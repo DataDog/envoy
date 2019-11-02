@@ -118,9 +118,9 @@ REPOSITORY_LOCATIONS = dict(
         urls = ["https://github.com/googleapis/googleapis/archive/d6f78d948c53f3b400bb46996eb3084359914f9b.tar.gz"],
     ),
     com_github_datadog_dd_opentracing_cpp = dict(
-        sha256 = "a3d1c03e7af570fa64c01df259e6e9bb78637a6bd9c65c6bf7e8703e466dc22f",
-        strip_prefix = "dd-opentracing-cpp-0.4.2",
-        urls = ["https://github.com/DataDog/dd-opentracing-cpp/archive/v0.4.2.tar.gz"],
+        sha256 = "052fd37cd698e24ab73ee18fc3fa55acd1d43153c12a0e65b0fba0447de1117e",
+        strip_prefix = "dd-opentracing-cpp-1.1.1",
+        urls = ["https://github.com/DataDog/dd-opentracing-cpp/archive/v1.1.1.tar.gz"],
     ),
     com_github_google_benchmark = dict(
         # TODO(moderation) change back to tarball method on next benchmark release
