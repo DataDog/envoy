@@ -1,4 +1,5 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 load(":genrule_repository.bzl", "genrule_repository")
 load("@envoy_api//bazel:envoy_http_archive.bzl", "envoy_http_archive")
 load(":repository_locations.bzl", "REPOSITORY_LOCATIONS")
@@ -377,7 +378,12 @@ def _com_lightstep_tracer_cpp():
     )
 
 def _com_github_datadog_dd_opentracing_cpp():
-    _repository_impl("com_github_datadog_dd_opentracing_cpp")
+    #_repository_impl("com_github_datadog_dd_opentracing_cpp")
+    git_repository(
+        name = "com_github_datadog_dd_opentracing_cpp",
+        remote = "file:///home/ubuntu/datadog/dd-opentracing-cpp",
+        commit = "771889623daa0e3a588777e7368673e4da1453f4",
+    )
     _repository_impl(
         name = "com_github_msgpack_msgpack_c",
         build_file = "@com_github_datadog_dd_opentracing_cpp//:bazel/external/msgpack.BUILD",

@@ -75,6 +75,10 @@ public:
 
   OpenTracingTracerStats& tracerStats() { return tracer_stats_; }
 
+  virtual bool sampled(const opentracing::SpanContext&, const Tracing::Decision tracing_decision) {
+    return tracing_decision.traced;
+  }
+
 private:
   OpenTracingTracerStats tracer_stats_;
 };

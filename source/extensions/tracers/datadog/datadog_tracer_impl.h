@@ -57,6 +57,7 @@ public:
   PropagationMode propagationMode() const override {
     return Common::Ot::OpenTracingDriver::PropagationMode::TracerNative;
   }
+  bool sampled(const opentracing::SpanContext&, const Tracing::Decision tracing_decision) override;
 
 private:
   /**
@@ -108,6 +109,7 @@ public:
   // Http::AsyncClient::Callbacks.
   void onSuccess(Http::MessagePtr&&) override;
   void onFailure(Http::AsyncClient::FailureReason) override;
+  const TraceEncoderSharedPtr& encoder() { return encoder_; }
 
 private:
   /**

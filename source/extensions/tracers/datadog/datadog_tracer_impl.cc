@@ -56,6 +56,10 @@ Driver::Driver(const envoy::config::trace::v2::DatadogConfig& datadog_config,
 
 opentracing::Tracer& Driver::tracer() { return *tls_->getTyped<TlsTracer>().tracer_; }
 
+bool Driver::sampled(const opentracing::SpanContext& ctx, const Tracing::Decision tracing_decision) {
+  return tls_->getTyped<TlsTracer>().reporter_->encoder()->sampled(ctx, tracing_decision.traced);
+}
+
 TraceReporter::TraceReporter(TraceEncoderSharedPtr encoder, Driver& driver,
                              Event::Dispatcher& dispatcher)
     : driver_(driver), encoder_(encoder) {

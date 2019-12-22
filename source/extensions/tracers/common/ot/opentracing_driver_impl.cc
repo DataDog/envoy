@@ -191,7 +191,7 @@ Tracing::SpanPtr OpenTracingDriver::startSpan(const Tracing::Config& config,
   options.references.emplace_back(opentracing::SpanReferenceType::ChildOfRef,
                                   parent_span_ctx.get());
   options.start_system_timestamp = start_time;
-  if (!tracing_decision.traced) {
+  if (!sampled(*parent_span_ctx, tracing_decision)) {
     options.tags.emplace_back(opentracing::ext::sampling_priority, 0);
   }
   active_span = tracer.StartSpanWithOptions(operation_name, options);

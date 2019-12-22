@@ -42,6 +42,7 @@ public:
   // Non-standard tag names.
   const std::string DownstreamCluster = "downstream_cluster";
   const std::string ErrorReason = "error.reason";
+  const std::string GrpcMethod = "grpc.method";
   const std::string GrpcStatusCode = "grpc.status_code";
   const std::string GrpcMessage = "grpc.message";
   const std::string GuidXClientTraceId = "guid:x-client-trace-id";
