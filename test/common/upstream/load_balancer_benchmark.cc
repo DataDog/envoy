@@ -130,24 +130,24 @@ void benchmarkRoundRobinLoadBalancerBuild(::benchmark::State& state) {
     state.ResumeTiming();
   }
 }
-BENCHMARK(benchmarkRoundRobinLoadBalancerBuild)
-    ->Args({1, 0, 1})
-    ->Args({500, 0, 1})
-    ->Args({500, 50, 50})
-    ->Args({500, 100, 50})
-    ->Args({2500, 0, 1})
-    ->Args({2500, 50, 50})
-    ->Args({2500, 100, 50})
-    ->Args({10000, 0, 1})
-    ->Args({10000, 50, 50})
-    ->Args({10000, 100, 50})
-    ->Args({25000, 0, 1})
-    ->Args({25000, 50, 50})
-    ->Args({25000, 100, 50})
-    ->Args({50000, 0, 1})
-    ->Args({50000, 50, 50})
-    ->Args({50000, 100, 50})
-    ->Unit(::benchmark::kMillisecond);
+//BENCHMARK(benchmarkRoundRobinLoadBalancerBuild)
+//    ->Args({1, 0, 1})
+//    ->Args({500, 0, 1})
+//    ->Args({500, 50, 50})
+//    ->Args({500, 100, 50})
+//    ->Args({2500, 0, 1})
+//    ->Args({2500, 50, 50})
+//    ->Args({2500, 100, 50})
+//    ->Args({10000, 0, 1})
+//    ->Args({10000, 50, 50})
+//    ->Args({10000, 100, 50})
+//    ->Args({25000, 0, 1})
+//    ->Args({25000, 50, 50})
+//    ->Args({25000, 100, 50})
+//    ->Args({50000, 0, 1})
+//    ->Args({50000, 50, 50})
+//    ->Args({50000, 100, 50})
+//    ->Unit(::benchmark::kMillisecond);
 
 class RingHashTester : public BaseTester {
 public:
@@ -198,14 +198,14 @@ void benchmarkRingHashLoadBalancerBuildRing(::benchmark::State& state) {
     state.ResumeTiming();
   }
 }
-BENCHMARK(benchmarkRingHashLoadBalancerBuildRing)
-    ->Args({100, 65536})
-    ->Args({200, 65536})
-    ->Args({500, 65536})
-    ->Args({100, 256000})
-    ->Args({200, 256000})
-    ->Args({500, 256000})
-    ->Unit(::benchmark::kMillisecond);
+//BENCHMARK(benchmarkRingHashLoadBalancerBuildRing)
+//    ->Args({100, 65536})
+//    ->Args({200, 65536})
+//    ->Args({500, 65536})
+//    ->Args({100, 256000})
+//    ->Args({200, 256000})
+//    ->Args({500, 256000})
+//    ->Unit(::benchmark::kMillisecond);
 
 void benchmarkMaglevLoadBalancerBuildTable(::benchmark::State& state) {
   for (auto _ : state) { // NOLINT: Silences warning about dead store
@@ -225,11 +225,11 @@ void benchmarkMaglevLoadBalancerBuildTable(::benchmark::State& state) {
     state.ResumeTiming();
   }
 }
-BENCHMARK(benchmarkMaglevLoadBalancerBuildTable)
-    ->Arg(100)
-    ->Arg(200)
-    ->Arg(500)
-    ->Unit(::benchmark::kMillisecond);
+//BENCHMARK(benchmarkMaglevLoadBalancerBuildTable)
+//    ->Arg(100)
+//    ->Arg(200)
+//    ->Arg(500)
+//    ->Unit(::benchmark::kMillisecond);
 
 class TestLoadBalancerContext : public LoadBalancerContextBase {
 public:
@@ -286,20 +286,20 @@ void benchmarkLeastRequestLoadBalancerChooseHost(::benchmark::State& state) {
     state.ResumeTiming();
   }
 }
-BENCHMARK(benchmarkLeastRequestLoadBalancerChooseHost)
-    ->Args({100, 1, 1000})
-    ->Args({100, 2, 1000})
-    ->Args({100, 3, 1000})
-    ->Args({100, 10, 1000})
-    ->Args({100, 50, 1000})
-    ->Args({100, 100, 1000})
-    ->Args({100, 1, 1000000})
-    ->Args({100, 2, 1000000})
-    ->Args({100, 3, 1000000})
-    ->Args({100, 10, 1000000})
-    ->Args({100, 50, 1000000})
-    ->Args({100, 100, 1000000})
-    ->Unit(::benchmark::kMillisecond);
+//BENCHMARK(benchmarkLeastRequestLoadBalancerChooseHost)
+//    ->Args({100, 1, 1000})
+//    ->Args({100, 2, 1000})
+//    ->Args({100, 3, 1000})
+//    ->Args({100, 10, 1000})
+//    ->Args({100, 50, 1000})
+//    ->Args({100, 100, 1000})
+//    ->Args({100, 1, 1000000})
+//    ->Args({100, 2, 1000000})
+//    ->Args({100, 3, 1000000})
+//    ->Args({100, 10, 1000000})
+//    ->Args({100, 50, 1000000})
+//    ->Args({100, 100, 1000000})
+//    ->Unit(::benchmark::kMillisecond);
 
 void benchmarkRingHashLoadBalancerChooseHost(::benchmark::State& state) {
   for (auto _ : state) { // NOLINT: Silences warning about dead store
@@ -367,11 +367,11 @@ void benchmarkMaglevLoadBalancerChooseHost(::benchmark::State& state) {
     state.ResumeTiming();
   }
 }
-BENCHMARK(benchmarkMaglevLoadBalancerChooseHost)
-    ->Args({100, 100000})
-    ->Args({200, 100000})
-    ->Args({500, 100000})
-    ->Unit(::benchmark::kMillisecond);
+//BENCHMARK(benchmarkMaglevLoadBalancerChooseHost)
+//    ->Args({100, 100000})
+//    ->Args({200, 100000})
+//    ->Args({500, 100000})
+//    ->Unit(::benchmark::kMillisecond);
 
 void benchmarkRingHashLoadBalancerHostLoss(::benchmark::State& state) {
   const uint64_t num_hosts = state.range(0);
@@ -418,14 +418,14 @@ void benchmarkRingHashLoadBalancerHostLoss(::benchmark::State& state) {
         (static_cast<double>(hosts_to_lose) / num_hosts) * 100;
   }
 }
-BENCHMARK(benchmarkRingHashLoadBalancerHostLoss)
-    ->Args({500, 65536, 1, 10000})
-    ->Args({500, 65536, 2, 10000})
-    ->Args({500, 65536, 3, 10000})
-    ->Args({500, 256000, 1, 10000})
-    ->Args({500, 256000, 2, 10000})
-    ->Args({500, 256000, 3, 10000})
-    ->Unit(::benchmark::kMillisecond);
+//BENCHMARK(benchmarkRingHashLoadBalancerHostLoss)
+//    ->Args({500, 65536, 1, 10000})
+//    ->Args({500, 65536, 2, 10000})
+//    ->Args({500, 65536, 3, 10000})
+//    ->Args({500, 256000, 1, 10000})
+//    ->Args({500, 256000, 2, 10000})
+//    ->Args({500, 256000, 3, 10000})
+//    ->Unit(::benchmark::kMillisecond);
 
 void benchmarkMaglevLoadBalancerHostLoss(::benchmark::State& state) {
   for (auto _ : state) { // NOLINT: Silences warning about dead store
@@ -466,11 +466,11 @@ void benchmarkMaglevLoadBalancerHostLoss(::benchmark::State& state) {
         (static_cast<double>(hosts_to_lose) / num_hosts) * 100;
   }
 }
-BENCHMARK(benchmarkMaglevLoadBalancerHostLoss)
-    ->Args({500, 1, 10000})
-    ->Args({500, 2, 10000})
-    ->Args({500, 3, 10000})
-    ->Unit(::benchmark::kMillisecond);
+//BENCHMARK(benchmarkMaglevLoadBalancerHostLoss)
+//    ->Args({500, 1, 10000})
+//    ->Args({500, 2, 10000})
+//    ->Args({500, 3, 10000})
+//    ->Unit(::benchmark::kMillisecond);
 
 void benchmarkMaglevLoadBalancerWeighted(::benchmark::State& state) {
   for (auto _ : state) { // NOLINT: Silences warning about dead store
@@ -519,17 +519,17 @@ void benchmarkMaglevLoadBalancerWeighted(::benchmark::State& state) {
         std::abs(weighted_hosts_percent(before_weight) - weighted_hosts_percent(after_weight));
   }
 }
-BENCHMARK(benchmarkMaglevLoadBalancerWeighted)
-    ->Args({500, 5, 1, 1, 10000})
-    ->Args({500, 5, 1, 127, 1000})
-    ->Args({500, 5, 127, 1, 10000})
-    ->Args({500, 50, 1, 127, 1000})
-    ->Args({500, 50, 127, 1, 10000})
-    ->Args({500, 95, 1, 127, 1000})
-    ->Args({500, 95, 127, 1, 10000})
-    ->Args({500, 95, 25, 75, 1000})
-    ->Args({500, 95, 75, 25, 10000})
-    ->Unit(::benchmark::kMillisecond);
+//BENCHMARK(benchmarkMaglevLoadBalancerWeighted)
+//    ->Args({500, 5, 1, 1, 10000})
+//    ->Args({500, 5, 1, 127, 1000})
+//    ->Args({500, 5, 127, 1, 10000})
+//    ->Args({500, 50, 1, 127, 1000})
+//    ->Args({500, 50, 127, 1, 10000})
+//    ->Args({500, 95, 1, 127, 1000})
+//    ->Args({500, 95, 127, 1, 10000})
+//    ->Args({500, 95, 25, 75, 1000})
+//    ->Args({500, 95, 75, 25, 10000})
+//    ->Unit(::benchmark::kMillisecond);
 
 class SubsetLbTester : public BaseTester {
 public:
@@ -589,9 +589,9 @@ void benchmarkSubsetLoadBalancerCreate(::benchmark::State& state) {
   }
 }
 
-BENCHMARK(benchmarkSubsetLoadBalancerCreate)
-    ->Ranges({{false, true}, {50, 2500}})
-    ->Unit(::benchmark::kMillisecond);
+//BENCHMARK(benchmarkSubsetLoadBalancerCreate)
+//    ->Ranges({{false, true}, {50, 2500}})
+//    ->Unit(::benchmark::kMillisecond);
 
 void benchmarkSubsetLoadBalancerUpdate(::benchmark::State& state) {
   const bool single_host_per_subset = state.range(0);
@@ -607,9 +607,9 @@ void benchmarkSubsetLoadBalancerUpdate(::benchmark::State& state) {
   }
 }
 
-BENCHMARK(benchmarkSubsetLoadBalancerUpdate)
-    ->Ranges({{false, true}, {50, 2500}})
-    ->Unit(::benchmark::kMillisecond);
+//BENCHMARK(benchmarkSubsetLoadBalancerUpdate)
+//    ->Ranges({{false, true}, {50, 2500}})
+//    ->Unit(::benchmark::kMillisecond);
 
 } // namespace
 } // namespace Upstream
