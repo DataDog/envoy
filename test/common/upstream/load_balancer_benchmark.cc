@@ -338,6 +338,12 @@ BENCHMARK(benchmarkRingHashLoadBalancerChooseHost)
     ->Args({100, 256000, 100000})
     ->Args({200, 256000, 100000})
     ->Args({500, 256000, 100000})
+    ->Args({4, 16384, 100000})
+    ->Args({4, 65536, 100000})
+    ->Args({4, 256000, 100000})
+    ->Args({4, 16384, 100000000})
+    ->Args({4, 65536, 100000000})
+    ->Args({4, 256000, 100000000})
     ->Unit(::benchmark::kMillisecond);
 
 void benchmarkMaglevLoadBalancerChooseHost(::benchmark::State& state) {
