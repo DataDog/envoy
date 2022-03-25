@@ -44,6 +44,7 @@ def envoy_cc_binary(
         deps = deps,
         tags = tags,
         features = features,
+        additional_linker_inputs = ["@hot_functions"],
     )
 
 # Select the given values if exporting is enabled in the current build.
