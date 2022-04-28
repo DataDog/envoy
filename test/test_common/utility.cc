@@ -59,7 +59,7 @@ int32_t getSeed() {
 }
 
 TestRandomGenerator::TestRandomGenerator()
-    : seed_(GTEST_FLAG(random_seed) == 0 ? getSeed() : GTEST_FLAG(random_seed)), generator_(seed_) {
+    : seed_(636024315), generator_(seed_) {
   std::cerr << "TestRandomGenerator running with seed " << seed_ << "\n";
 }
 
