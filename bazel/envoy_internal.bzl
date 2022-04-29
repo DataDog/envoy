@@ -43,7 +43,7 @@ def envoy_copts(repository, test = False):
         "-wd4506",
     ]
 
-    return ["-O2", "-march=native"] + select({
+    return select({
                repository + "//bazel:windows_x86_64": msvc_options,
                "//conditions:default": posix_options,
            }) + select({
