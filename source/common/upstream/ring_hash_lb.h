@@ -7,8 +7,8 @@
 #include "envoy/stats/scope.h"
 #include "envoy/stats/stats_macros.h"
 
-#include "common/common/logger.h"
-#include "common/upstream/thread_aware_lb_impl.h"
+#include "source/common/common/logger.h"
+#include "source/common/upstream/thread_aware_lb_impl.h"
 
 namespace Envoy {
 namespace Upstream {
@@ -66,6 +66,11 @@ private:
 
     std::vector<RingEntry> ring_;
 
+#ifdef BUCKET_ALGORITHM
+    std::vector<uint64_t> ring_bucket_;
+    uint64_t rightShift;
+#endif
+
     RingHashLoadBalancerStats& stats_;
   };
   using RingConstSharedPtr = std::shared_ptr<const Ring>;
@@ -87,7 +92,7 @@ private:
 
   static RingHashLoadBalancerStats generateStats(Stats::Scope& scope);
 
-  Stats::ScopePtr scope_;
+  Stats::ScopeSharedPtr scope_;
   RingHashLoadBalancerStats stats_;
 
   static const uint64_t DefaultMinRingSize = 1024;
