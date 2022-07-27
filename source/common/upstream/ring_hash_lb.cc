@@ -1,4 +1,4 @@
-#include "source/common/upstream/ring_hash_lb.h"
+#include "common/upstream/ring_hash_lb.h"
 
 #include <cstdint>
 #include <iostream>
@@ -7,8 +7,8 @@
 
 #include "envoy/config/cluster/v3/cluster.pb.h"
 
-#include "source/common/common/assert.h"
-#include "source/common/upstream/load_balancer_impl.h"
+#include "common/common/assert.h"
+#include "common/upstream/load_balancer_impl.h"
 
 #include "absl/container/inlined_vector.h"
 #include "absl/strings/string_view.h"
@@ -166,10 +166,11 @@ RingHashLoadBalancer::Ring::Ring(const NormalizedHostWeightVector& normalized_ho
   uint64_t max_hashes_per_host = 0;
   for (const auto& entry : normalized_host_weights) {
     const auto& host = entry.first;
-    const absl::string_view key_to_hash = hashKey(host, use_hostname_for_hashing);
-    ASSERT(!key_to_hash.empty());
+    const std::string& address_string = 
+        use_hostname_for_hashing ? host->hostname() : host->address()->asString();
+    ASSERT(!address_string.empty());
 
-    hash_key_buffer.assign(key_to_hash.begin(), key_to_hash.end());
+    hash_key_buffer.assign(address_string.begin(), address_string.end());
     hash_key_buffer.emplace_back('_');
     auto offset_start = hash_key_buffer.end();
 
@@ -189,7 +190,7 @@ RingHashLoadBalancer::Ring::Ring(const NormalizedHostWeightVector& normalized_ho
               ? MurmurHash::murmurHash2(hash_key, MurmurHash::STD_HASH_SEED)
               : HashUtil::xxHash64(hash_key);
 
-      ENVOY_LOG(trace, "ring hash: hash_key={} hash={}", hash_key, hash);
+      ENVOY_LOG(trace, "ring hash: hash_key={} hash={}", hash_key.data(), hash);
       ring_.push_back({hash, host});
       ++i;
       ++current_hashes;
