@@ -205,7 +205,7 @@ RingHashLoadBalancer::Ring::Ring(const NormalizedHostWeightVector& normalized_ho
   });
   if (ENVOY_LOG_CHECK_LEVEL(trace)) {
     for (const auto& entry : ring_) {
-      ENVOY_LOG(trace, "ring_hash: host={} hash={}",
+      ENVOY_LOG(trace, "ring hash: host={} hash={}",
                 use_hostname_for_hashing ? entry.host_->hostname()
                                          : entry.host_->address()->asString(),
                 entry.hash_);
