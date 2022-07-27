@@ -166,7 +166,7 @@ RingHashLoadBalancer::Ring::Ring(const NormalizedHostWeightVector& normalized_ho
   uint64_t max_hashes_per_host = 0;
   for (const auto& entry : normalized_host_weights) {
     const auto& host = entry.first;
-    const std::string& address_string = 
+    const std::string& address_string =
         use_hostname_for_hashing ? host->hostname() : host->address()->asString();
     ASSERT(!address_string.empty());
 
@@ -205,8 +205,10 @@ RingHashLoadBalancer::Ring::Ring(const NormalizedHostWeightVector& normalized_ho
   });
   if (ENVOY_LOG_CHECK_LEVEL(trace)) {
     for (const auto& entry : ring_) {
-      const absl::string_view key_to_hash = hashKey(entry.host_, use_hostname_for_hashing);
-      ENVOY_LOG(trace, "ring hash: host={} hash={}", key_to_hash, entry.hash_);
+      ENVOY_LOG(trace, "ring_hash: host={} hash={}",
+                use_hostname_for_hashing ? entry.host_->hostname()
+                                         : entry.host_->address()->asString(),
+                entry.hash_);
     }
   }
 
