@@ -7,8 +7,8 @@
 #include "envoy/stats/scope.h"
 #include "envoy/stats/stats_macros.h"
 
-#include "source/common/common/logger.h"
-#include "source/common/upstream/thread_aware_lb_impl.h"
+#include "common/common/logger.h"
+#include "common/upstream/thread_aware_lb_impl.h"
 
 namespace Envoy {
 namespace Upstream {
@@ -92,7 +92,7 @@ private:
 
   static RingHashLoadBalancerStats generateStats(Stats::Scope& scope);
 
-  Stats::ScopeSharedPtr scope_;
+  Stats::ScopePtr scope_;
   RingHashLoadBalancerStats stats_;
 
   static const uint64_t DefaultMinRingSize = 1024;
