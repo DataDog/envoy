@@ -223,11 +223,9 @@ RingHashLoadBalancer::Ring::Ring(const NormalizedHostWeightVector& normalized_ho
     n = n / 2;
     msb++;
   }
-  // Arbitrarily choosing MSB + 10 bits to shift to right for creating bucket. The larger the shift
-  // to right, the fewer the buckets. One can experiments with + 10, 12, 14, ... 20.
-  msb += 10;
-  // Save it for later use (when doing lookup of hosts for a given hash).
-  rightShift = msb;
+  // Arbitrarily choosing MSB + 10 bits to shift hash to right for creating buckets. The larger the shift
+  // to right, the fewer the buckets. Experiment with values 10, 12, ... 30, the BUCKET_SHIFT parameter.
+  rightShift += msb;
 
   // Reserve memory for bucket indices. Worst-case, every hash belongs to a different bucket!
   // The ring_bucket_ container stores the start indices of the buckets.
@@ -242,7 +240,7 @@ RingHashLoadBalancer::Ring::Ring(const NormalizedHostWeightVector& normalized_ho
     ring_bucket_.push_back(ring_index);
 
   for (const auto& entry : ring_) {
-    curr_bucket = entry.hash_ >> msb;
+    curr_bucket = entry.hash_ >> rightShift;
     // If new bucket found, push the index to ring_bucket_ and update curr_bucket.
     if(curr_bucket != prev_bucket)
     {
