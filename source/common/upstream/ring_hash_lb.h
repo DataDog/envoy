@@ -13,6 +13,12 @@
 namespace Envoy {
 namespace Upstream {
 
+#ifdef BUCKET_ALGORITHM
+#ifndef BUCKET_SHIFT
+#define BUCKET_SHIFT 10
+#endif
+#endif
+
 /**
  * All ring hash load balancer stats. @see stats_macros.h
  */
@@ -65,6 +71,11 @@ private:
     HostConstSharedPtr chooseHost(uint64_t hash, uint32_t attempt) const override;
 
     std::vector<RingEntry> ring_;
+
+#ifdef BUCKET_ALGORITHM
+    std::vector<uint64_t> ring_bucket_;
+    uint64_t rightShift = BUCKET_SHIFT;
+#endif
 
     RingHashLoadBalancerStats& stats_;
   };

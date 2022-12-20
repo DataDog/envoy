@@ -58,8 +58,25 @@ HostConstSharedPtr RingHashLoadBalancer::Ring::chooseHost(uint64_t h, uint32_t a
   // I've generally kept the variable names to make the code easier to compare.
   // NOTE: The algorithm depends on using signed integers for lowp, midp, and highp. Do not
   //       change them!
-  int64_t lowp = 0;
-  int64_t highp = ring_.size();
+  int64_t lowp, highp;
+
+  // Algorithm is to shard the indices and lookup the host for a given hash from a bucket 
+  // (instead of a lookup of all hosts). Hence fewer lookups/ accesses and faster execution.
+#ifdef BUCKET_ALGORITHM
+
+  // Given a hash 'h', find the bucket index by shifting it to right (by rightShift).
+  uint64_t bucket_index = h >> rightShift;
+  // 'lowp' and 'highp' are the lower and upper indices of the bucket.
+  lowp  = ring_bucket_[bucket_index];
+  highp = ring_bucket_[bucket_index + 1] - 1;
+
+#else
+
+  lowp = 0;
+  highp = ring_.size();
+
+#endif
+
   int64_t midp = 0;
   while (true) {
     midp = (lowp + highp) / 2;
@@ -191,6 +208,49 @@ RingHashLoadBalancer::Ring::Ring(const NormalizedHostWeightVector& normalized_ho
       ENVOY_LOG(trace, "ring hash: host={} hash={}", key_to_hash, entry.hash_);
     }
   }
+
+#ifdef BUCKET_ALGORITHM
+  /******* BEGIN: code for bucketing algorithm *******/
+
+  // Find MSB bit of the first hash so we can right shift all the other hashes to create buckets.
+  int msb = 0;
+  uint64_t n = ring_[0].hash_;
+  n = n / 2;
+  while (n != 0) {
+    n = n / 2;
+    msb++;
+  }
+  // Arbitrarily choosing MSB + 10 bits to shift hash to right for creating buckets. The larger the shift
+  // to right, the fewer the buckets. Experiment with values 10, 12, ... 30, the BUCKET_SHIFT parameter.
+  rightShift += msb;
+
+  // Reserve memory for bucket indices. Worst-case, every hash belongs to a different bucket!
+  // The ring_bucket_ container stores the start indices of the buckets.
+  ring_bucket_.reserve(ring_size);
+
+  // Right shift each hash and create buckets of the hosts.
+  uint64_t ring_index = 0;
+  uint64_t curr_bucket, prev_bucket = 0;
+
+  // push the first index if the ring_ isn't empty
+  if(!ring_.empty())
+    ring_bucket_.push_back(ring_index);
+
+  for (const auto& entry : ring_) {
+    curr_bucket = entry.hash_ >> rightShift;
+    // If new bucket found, push the index to ring_bucket_ and update curr_bucket.
+    if(curr_bucket != prev_bucket)
+    {
+      prev_bucket = curr_bucket;
+      ring_bucket_.push_back(ring_index);
+    }
+    ring_index++;
+  }
+  // For the last bucket, we need end and hence storing ring_size value.
+  ring_bucket_.push_back(ring_size);
+
+  /******* END: code for bucketing algorithm *******/
+#endif
 
   stats_.size_.set(ring_size);
   stats_.min_hashes_per_host_.set(min_hashes_per_host);
