@@ -10,6 +10,7 @@ import "google/protobuf/empty.proto";
 message HttpRespond {
   test.fuzz.Headers headers = 1;
   uint64 status = 2 [(validate.rules).uint64.lt = 1000];
+  bytes body = 3;
 }
 
 message TcpRespond {
@@ -95,4 +96,5 @@ message HealthCheckTestCase {
   repeated Action actions = 2;
   bool http_verify_cluster = 3; //Determines if verify cluster setting is on
   bool start_failed = 4;
+  bool upstream_cx_success = 5;
 }

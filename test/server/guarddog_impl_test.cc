@@ -10,12 +10,11 @@
 #include "envoy/server/watchdog.h"
 #include "envoy/thread/thread.h"
 
-#include "common/api/api_impl.h"
-#include "common/common/macros.h"
-#include "common/common/utility.h"
-#include "common/protobuf/utility.h"
-
-#include "server/guarddog_impl.h"
+#include "source/common/api/api_impl.h"
+#include "source/common/common/macros.h"
+#include "source/common/common/utility.h"
+#include "source/common/protobuf/utility.h"
+#include "source/server/guarddog_impl.h"
 
 #include "test/mocks/common.h"
 #include "test/mocks/event/mocks.h"
@@ -574,7 +573,7 @@ protected:
           "config": {
             "name": "LogFactory",
             "typed_config": {
-              "@type": "type.googleapis.com/google.protobuf.Empty"
+              "@type": "type.googleapis.com/google.protobuf.Struct"
             }
           },
           "event": "MEGAMISS"
@@ -585,7 +584,7 @@ protected:
           "config": {
             "name": "LogFactory",
             "typed_config": {
-              "@type": "type.googleapis.com/google.protobuf.Empty"
+              "@type": "type.googleapis.com/google.protobuf.Struct"
             }
           },
           "event": "MISS"
@@ -601,7 +600,7 @@ protected:
 
   std::vector<std::string> actions_;
   std::vector<std::string> events_;
-  RecordGuardDogActionFactory<Envoy::ProtobufWkt::Empty> log_factory_;
+  RecordGuardDogActionFactory<Envoy::ProtobufWkt::Struct> log_factory_;
   Registry::InjectFactory<Configuration::GuardDogActionFactory> register_log_factory_;
   AssertGuardDogActionFactory<Envoy::ProtobufWkt::Empty> assert_factory_;
   Registry::InjectFactory<Configuration::GuardDogActionFactory> register_assert_factory_;
@@ -625,7 +624,19 @@ TEST_P(GuardDogActionsTest, MissShouldOnlyReportRelevantThreads) {
   // synchronize with the guard dog.
   guard_dog_->forceCheckForTest();
 
+  if (GetParam() == TimeSystemType::Real) {
+    // Touch the second_dog in case we overslept in the real time system
+    // and the guard dog timer goes off.
+    second_dog_->touch();
+  }
+
   time_system_->advanceTimeWait(std::chrono::milliseconds(51));
+
+  if (GetParam() == TimeSystemType::Real) {
+    // Touch the second_dog in case we overslept in the real time system
+    // and the prior "touch" was consumed.
+    second_dog_->touch();
+  }
   guard_dog_->forceCheckForTest();
 
   EXPECT_THAT(events_, ElementsAre("MISS : 10"));
@@ -687,7 +698,19 @@ TEST_P(GuardDogActionsTest, MegaMissShouldOnlyReportRelevantThreads) {
   // synchronize with the guard dog.
   guard_dog_->forceCheckForTest();
 
+  if (GetParam() == TimeSystemType::Real) {
+    // Touch the second_dog in case we overslept in the real time system
+    // and the guard dog timer goes off.
+    second_dog_->touch();
+  }
+
   time_system_->advanceTimeWait(std::chrono::milliseconds(51));
+
+  if (GetParam() == TimeSystemType::Real) {
+    // Touch the second_dog in case we overslept in the real time system
+    // and the prior "touch" was consumed.
+    second_dog_->touch();
+  }
   guard_dog_->forceCheckForTest();
 
   EXPECT_THAT(events_, ElementsAre("MEGAMISS : 10"));
@@ -738,6 +761,8 @@ TEST_P(GuardDogActionsTest, MegaMissShouldSaturateOnMegaMissEvent) {
   EXPECT_THAT(events_, ElementsAre("MEGAMISS : 10", "MEGAMISS : 10"));
 }
 
+// Disabled for coverage per #18229
+#if !defined(ENVOY_CONFIG_COVERAGE)
 TEST_P(GuardDogActionsTest, ShouldRespectEventPriority) {
   // Priority of events are KILL, MULTIKILL, MEGAMISS and MISS
 
@@ -781,6 +806,7 @@ TEST_P(GuardDogActionsTest, ShouldRespectEventPriority) {
   guard_dog_->forceCheckForTest();
   EXPECT_THAT(events_, ElementsAre("MEGAMISS : 10", "MISS : 10"));
 }
+#endif
 
 TEST_P(GuardDogActionsTest, KillShouldTriggerGuardDogActions) {
   auto die_function = [&]() -> void {
@@ -794,6 +820,8 @@ TEST_P(GuardDogActionsTest, KillShouldTriggerGuardDogActions) {
   EXPECT_DEATH(die_function(), "ASSERT_GUARDDOG_ACTION");
 }
 
+// Disabled for coverage per #18229
+#if !defined(ENVOY_CONFIG_COVERAGE)
 TEST_P(GuardDogActionsTest, MultikillShouldTriggerGuardDogActions) {
   auto die_function = [&]() -> void {
     const NiceMock<Configuration::MockWatchdog> config(DISABLE_MISS, DISABLE_MEGAMISS, DISABLE_KILL,
@@ -807,6 +835,7 @@ TEST_P(GuardDogActionsTest, MultikillShouldTriggerGuardDogActions) {
 
   EXPECT_DEATH(die_function(), "ASSERT_GUARDDOG_ACTION");
 }
+#endif
 
 } // namespace
 } // namespace Server

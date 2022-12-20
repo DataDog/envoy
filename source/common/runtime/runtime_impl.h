@@ -21,13 +21,13 @@
 #include "envoy/type/v3/percent.pb.h"
 #include "envoy/upstream/cluster_manager.h"
 
-#include "common/common/assert.h"
-#include "common/common/logger.h"
-#include "common/common/thread.h"
-#include "common/config/subscription_base.h"
-#include "common/init/manager_impl.h"
-#include "common/init/target_impl.h"
-#include "common/singleton/threadsafe_singleton.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/logger.h"
+#include "source/common/common/thread.h"
+#include "source/common/config/subscription_base.h"
+#include "source/common/init/manager_impl.h"
+#include "source/common/init/target_impl.h"
+#include "source/common/singleton/threadsafe_singleton.h"
 
 #include "absl/container/node_hash_map.h"
 #include "spdlog/spdlog.h"
@@ -84,6 +84,8 @@ public:
   double getDouble(absl::string_view key, double default_value) const override;
   bool getBoolean(absl::string_view key, bool value) const override;
   const std::vector<OverrideLayerConstPtr>& getLayers() const override;
+
+  const EntryMap& values() const;
 
   static Entry createEntry(const std::string& value);
   static Entry createEntry(const ProtobufWkt::Value& value);
@@ -212,7 +214,7 @@ struct RtdsSubscription : Envoy::Config::SubscriptionBase<envoy::service::runtim
   LoaderImpl& parent_;
   const envoy::config::core::v3::ConfigSource config_source_;
   Stats::Store& store_;
-  Stats::ScopePtr stats_scope_;
+  Stats::ScopeSharedPtr stats_scope_;
   Config::SubscriptionPtr subscription_;
   std::string resource_name_;
   Init::TargetImpl init_target_;

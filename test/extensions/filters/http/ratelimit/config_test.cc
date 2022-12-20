@@ -2,7 +2,7 @@
 #include "envoy/extensions/filters/http/ratelimit/v3/rate_limit.pb.h"
 #include "envoy/extensions/filters/http/ratelimit/v3/rate_limit.pb.validate.h"
 
-#include "extensions/filters/http/ratelimit/config.h"
+#include "source/extensions/filters/http/ratelimit/config.h"
 
 #include "test/mocks/server/factory_context.h"
 #include "test/mocks/server/instance.h"
@@ -20,8 +20,10 @@ namespace {
 
 TEST(RateLimitFilterConfigTest, ValidateFail) {
   NiceMock<Server::Configuration::MockFactoryContext> context;
-  EXPECT_THROW(RateLimitFilterConfig().createFilterFactoryFromProto(
-                   envoy::extensions::filters::http::ratelimit::v3::RateLimit(), "stats", context),
+  envoy::extensions::filters::http::ratelimit::v3::RateLimit config;
+  config.mutable_rate_limit_service()->set_transport_api_version(
+      envoy::config::core::v3::ApiVersion::V3);
+  EXPECT_THROW(RateLimitFilterConfig().createFilterFactoryFromProto(config, "stats", context),
                ProtoValidationException);
 }
 
@@ -30,6 +32,7 @@ TEST(RateLimitFilterConfigTest, RatelimitCorrectProto) {
   domain: test
   timeout: 2s
   rate_limit_service:
+    transport_api_version: V3
     grpc_service:
       envoy_grpc:
         cluster_name: ratelimit_cluster
@@ -40,9 +43,9 @@ TEST(RateLimitFilterConfigTest, RatelimitCorrectProto) {
 
   NiceMock<Server::Configuration::MockFactoryContext> context;
 
-  EXPECT_CALL(context.cluster_manager_.async_client_manager_, factoryForGrpcService(_, _, _))
+  EXPECT_CALL(context.cluster_manager_.async_client_manager_, getOrCreateRawAsyncClient(_, _, _))
       .WillOnce(Invoke([](const envoy::config::core::v3::GrpcService&, Stats::Scope&, bool) {
-        return std::make_unique<NiceMock<Grpc::MockAsyncClientFactory>>();
+        return std::make_unique<NiceMock<Grpc::MockAsyncClient>>();
       }));
 
   RateLimitFilterConfig factory;
@@ -73,18 +76,7 @@ TEST(RateLimitFilterConfigTest, BadRateLimitFilterConfig) {
   )EOF";
 
   envoy::extensions::filters::http::ratelimit::v3::RateLimit proto_config{};
-  EXPECT_THROW_WITH_REGEX(TestUtility::loadFromYamlAndValidate(yaml, proto_config), EnvoyException,
-                          "route_key: Cannot find field");
-}
-
-// Test that the deprecated extension name still functions.
-TEST(RateLimitFilterConfigTest, DEPRECATED_FEATURE_TEST(DeprecatedExtensionFilterName)) {
-  const std::string deprecated_name = "envoy.rate_limit";
-
-  ASSERT_NE(
-      nullptr,
-      Registry::FactoryRegistry<Server::Configuration::NamedHttpFilterConfigFactory>::getFactory(
-          deprecated_name));
+  EXPECT_THROW(TestUtility::loadFromYamlAndValidate(yaml, proto_config), EnvoyException);
 }
 
 } // namespace

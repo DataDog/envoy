@@ -1,3 +1,11 @@
+#ifndef WIN32
+#include <net/if.h>
+
+#else
+#include <winsock2.h>
+#include <iphlpapi.h>
+#endif
+
 #include <cstdint>
 #include <list>
 #include <memory>
@@ -6,46 +14,50 @@
 #include "envoy/common/exception.h"
 #include "envoy/config/core/v3/address.pb.h"
 
-#include "common/common/thread.h"
-#include "common/network/address_impl.h"
-#include "common/network/utility.h"
+#include "source/common/common/thread.h"
+#include "source/common/network/address_impl.h"
+#include "source/common/network/io_socket_handle_impl.h"
+#include "source/common/network/utility.h"
 
+#include "test/mocks/api/mocks.h"
 #include "test/mocks/network/mocks.h"
 #include "test/test_common/environment.h"
 #include "test/test_common/network_utility.h"
+#include "test/test_common/threadsafe_singleton_injector.h"
 #include "test/test_common/utility.h"
 
 #include "gtest/gtest.h"
+
+using testing::DoAll;
+using testing::Eq;
+using testing::Return;
 
 namespace Envoy {
 namespace Network {
 namespace {
 
-TEST(NetworkUtility, Url) {
-  EXPECT_EQ("foo", Utility::hostFromTcpUrl("tcp://foo:1234"));
-  EXPECT_EQ(1234U, Utility::portFromTcpUrl("tcp://foo:1234"));
-  EXPECT_THROW(Utility::hostFromTcpUrl("bogus://foo:1234"), EnvoyException);
-  EXPECT_THROW(Utility::portFromTcpUrl("bogus://foo:1234"), EnvoyException);
-  EXPECT_THROW(Utility::hostFromTcpUrl("abc://foo"), EnvoyException);
-  EXPECT_THROW(Utility::portFromTcpUrl("abc://foo"), EnvoyException);
-  EXPECT_THROW(Utility::hostFromTcpUrl("tcp://foo"), EnvoyException);
-  EXPECT_THROW(Utility::portFromTcpUrl("tcp://foo"), EnvoyException);
-  EXPECT_THROW(Utility::portFromTcpUrl("tcp://foo:bar"), EnvoyException);
-  EXPECT_THROW(Utility::portFromTcpUrl("tcp://https://foo:1234"), EnvoyException);
-  EXPECT_THROW(Utility::hostFromTcpUrl(""), EnvoyException);
-  EXPECT_THROW(Utility::portFromTcpUrl("tcp://foo:999999999999"), EnvoyException);
-}
+struct Interface {
+  std::string name;
+  uint32_t if_index;
+};
 
-TEST(NetworkUtility, udpUrl) {
-  EXPECT_EQ("foo", Utility::hostFromUdpUrl("udp://foo:1234"));
-  EXPECT_EQ(1234U, Utility::portFromUdpUrl("udp://foo:1234"));
-  EXPECT_THROW(Utility::hostFromUdpUrl("bogus://foo:1234"), EnvoyException);
-  EXPECT_THROW(Utility::portFromUdpUrl("bogus://foo:1234"), EnvoyException);
-  EXPECT_THROW(Utility::hostFromUdpUrl("tcp://foo"), EnvoyException);
-  EXPECT_THROW(Utility::portFromUdpUrl("tcp://foo:1234"), EnvoyException);
-  EXPECT_THROW(Utility::portFromUdpUrl("udp://https://foo:1234"), EnvoyException);
-  EXPECT_THROW(Utility::hostFromUdpUrl(""), EnvoyException);
-  EXPECT_THROW(Utility::portFromUdpUrl("udp://foo:999999999999"), EnvoyException);
+// Helper function that returns any usable interface present while running the test.
+StatusOr<Interface> getLocalNetworkInterface() {
+  if (!Api::OsSysCallsSingleton::get().supportsGetifaddrs()) {
+    return absl::FailedPreconditionError("getifaddrs not supported");
+  }
+  Api::InterfaceAddressVector interface_addresses{};
+  const Api::SysCallIntResult rc = Api::OsSysCallsSingleton::get().getifaddrs(interface_addresses);
+  ASSERT(rc.return_value_ == 0);
+  if (!interface_addresses.empty()) {
+    for (const auto& ifc : interface_addresses) {
+      Interface interface;
+      interface.name = ifc.interface_name_;
+      interface.if_index = if_nametoindex(ifc.interface_name_.c_str());
+      return interface;
+    }
+  }
+  return absl::NotFoundError("no interface available");
 }
 
 TEST(NetworkUtility, resolveUrl) {
@@ -101,6 +113,23 @@ TEST(NetworkUtility, resolveUrl) {
   EXPECT_EQ("[a:b:c:d::]:0", Utility::resolveUrl("udp://[a:b:c:d::]:0")->asString());
 }
 
+TEST(NetworkUtility, socketTypeFromUrl) {
+  EXPECT_FALSE(Utility::socketTypeFromUrl("foo").ok());
+  EXPECT_FALSE(Utility::socketTypeFromUrl("abc://foo").ok());
+
+  EXPECT_EQ(Network::Socket::Type::Stream, *Utility::socketTypeFromUrl("unix://"));
+  EXPECT_EQ(Network::Socket::Type::Stream, *Utility::socketTypeFromUrl("unix://foo"));
+  EXPECT_EQ(Network::Socket::Type::Stream, *Utility::socketTypeFromUrl("unix://tmp/server"));
+
+  EXPECT_EQ(Network::Socket::Type::Stream, *Utility::socketTypeFromUrl("tcp://1.2.3.4:1234"));
+  EXPECT_EQ(Network::Socket::Type::Stream, *Utility::socketTypeFromUrl("tcp://0.0.0.0:0"));
+  EXPECT_EQ(Network::Socket::Type::Stream, *Utility::socketTypeFromUrl("tcp://[::1]:1"));
+
+  EXPECT_EQ(Network::Socket::Type::Datagram, *Utility::socketTypeFromUrl("udp://1.2.3.4:1234"));
+  EXPECT_EQ(Network::Socket::Type::Datagram, *Utility::socketTypeFromUrl("udp://0.0.0.0:0"));
+  EXPECT_EQ(Network::Socket::Type::Datagram, *Utility::socketTypeFromUrl("udp://[::1]:1"));
+}
+
 TEST(NetworkUtility, ParseInternetAddress) {
   EXPECT_THROW(Utility::parseInternetAddress(""), EnvoyException);
   EXPECT_THROW(Utility::parseInternetAddress("1.2.3"), EnvoyException);
@@ -113,15 +142,49 @@ TEST(NetworkUtility, ParseInternetAddress) {
   EXPECT_THROW(Utility::parseInternetAddress("[::]"), EnvoyException);
   EXPECT_THROW(Utility::parseInternetAddress("[::1]:1"), EnvoyException);
 
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow(""));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow("1.2.3"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow("1.2.3.4.5"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow("1.2.3.256"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow("foo"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow("0:0:0:0"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow("fffff::"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow("/foo"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow("[::]"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow("[::1]:1"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressNoThrow("fe80::1%"));
+
   EXPECT_EQ("1.2.3.4:0", Utility::parseInternetAddress("1.2.3.4")->asString());
   EXPECT_EQ("0.0.0.0:0", Utility::parseInternetAddress("0.0.0.0")->asString());
   EXPECT_EQ("127.0.0.1:0", Utility::parseInternetAddress("127.0.0.1")->asString());
+
+  EXPECT_EQ("1.2.3.4:0", Utility::parseInternetAddressNoThrow("1.2.3.4")->asString());
+  EXPECT_EQ("0.0.0.0:0", Utility::parseInternetAddressNoThrow("0.0.0.0")->asString());
+  EXPECT_EQ("127.0.0.1:0", Utility::parseInternetAddressNoThrow("127.0.0.1")->asString());
 
   EXPECT_EQ("[::1]:0", Utility::parseInternetAddress("::1")->asString());
   EXPECT_EQ("[::]:0", Utility::parseInternetAddress("::")->asString());
   EXPECT_EQ("[1::2:3]:0", Utility::parseInternetAddress("1::2:3")->asString());
   EXPECT_EQ("[a::1]:0", Utility::parseInternetAddress("a::1")->asString());
   EXPECT_EQ("[a:b:c:d::]:0", Utility::parseInternetAddress("a:b:c:d::")->asString());
+
+  EXPECT_EQ("[::1]:0", Utility::parseInternetAddressNoThrow("::1")->asString());
+  EXPECT_EQ("[::]:0", Utility::parseInternetAddressNoThrow("::")->asString());
+  EXPECT_EQ("[1::2:3]:0", Utility::parseInternetAddressNoThrow("1::2:3")->asString());
+  EXPECT_EQ("[a::1]:0", Utility::parseInternetAddressNoThrow("a::1")->asString());
+  EXPECT_EQ("[a:b:c:d::]:0", Utility::parseInternetAddressNoThrow("a:b:c:d::")->asString());
+
+  StatusOr<Interface> ifc = getLocalNetworkInterface();
+  if (ifc.ok()) {
+    EXPECT_EQ(
+        absl::StrCat("[fe80::1%", ifc->if_index, "]:0"),
+        Utility::parseInternetAddressNoThrow(absl::StrCat("fe80::1%", ifc->name))->asString());
+    EXPECT_EQ(
+        absl::StrCat("[fe80::1%", ifc->if_index, "]:0"),
+        Utility::parseInternetAddressNoThrow(absl::StrCat("fe80::1%", ifc->if_index))->asString());
+    EXPECT_NE(*Utility::parseInternetAddressNoThrow("fe80::1"),
+              *Utility::parseInternetAddressNoThrow(absl::StrCat("fe80::1%", ifc->if_index)));
+  }
 }
 
 TEST(NetworkUtility, ParseInternetAddressAndPort) {
@@ -136,10 +199,26 @@ TEST(NetworkUtility, ParseInternetAddressAndPort) {
   EXPECT_THROW(Utility::parseInternetAddressAndPort("1.2.3.4:65536"), EnvoyException);
   EXPECT_THROW(Utility::parseInternetAddressAndPort("1.2.3.4:8008/"), EnvoyException);
 
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("1.2.3.4"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("1.2.3.4:"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("1.2.3.4::1"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("1.2.3.4:-1"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow(":1"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow(" :1"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("1.2.3:1"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("1.2.3.4]:2"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("1.2.3.4:65536"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("1.2.3.4:8008/"));
+
   EXPECT_EQ("0.0.0.0:0", Utility::parseInternetAddressAndPort("0.0.0.0:0")->asString());
   EXPECT_EQ("255.255.255.255:65535",
             Utility::parseInternetAddressAndPort("255.255.255.255:65535")->asString());
   EXPECT_EQ("127.0.0.1:0", Utility::parseInternetAddressAndPort("127.0.0.1:0")->asString());
+
+  EXPECT_EQ("0.0.0.0:0", Utility::parseInternetAddressAndPortNoThrow("0.0.0.0:0")->asString());
+  EXPECT_EQ("255.255.255.255:65535",
+            Utility::parseInternetAddressAndPortNoThrow("255.255.255.255:65535")->asString());
+  EXPECT_EQ("127.0.0.1:0", Utility::parseInternetAddressAndPortNoThrow("127.0.0.1:0")->asString());
 
   EXPECT_THROW(Utility::parseInternetAddressAndPort(""), EnvoyException);
   EXPECT_THROW(Utility::parseInternetAddressAndPort("::1"), EnvoyException);
@@ -154,9 +233,27 @@ TEST(NetworkUtility, ParseInternetAddressAndPort) {
   EXPECT_THROW(Utility::parseInternetAddressAndPort("[::]:bogus"), EnvoyException);
   EXPECT_THROW(Utility::parseInternetAddressAndPort("[1::1]:65536"), EnvoyException);
 
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow(""));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("::1"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("::"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("[[::]]:1"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("[::]:1]:2"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("]:[::1]:2"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("[1.2.3.4:0"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("[1.2.3.4]:0"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("[::]:"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("[::]:-1"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("[::]:bogus"));
+  EXPECT_EQ(nullptr, Utility::parseInternetAddressAndPortNoThrow("[1::1]:65536"));
+
   EXPECT_EQ("[::]:0", Utility::parseInternetAddressAndPort("[::]:0")->asString());
   EXPECT_EQ("[1::1]:65535", Utility::parseInternetAddressAndPort("[1::1]:65535")->asString());
   EXPECT_EQ("[::1]:0", Utility::parseInternetAddressAndPort("[::1]:0")->asString());
+
+  EXPECT_EQ("[::]:0", Utility::parseInternetAddressAndPortNoThrow("[::]:0")->asString());
+  EXPECT_EQ("[1::1]:65535",
+            Utility::parseInternetAddressAndPortNoThrow("[1::1]:65535")->asString());
+  EXPECT_EQ("[::1]:0", Utility::parseInternetAddressAndPortNoThrow("[::1]:0")->asString());
 }
 
 class NetworkUtilityGetLocalAddress : public testing::TestWithParam<Address::IpVersion> {};
@@ -165,8 +262,43 @@ INSTANTIATE_TEST_SUITE_P(IpVersions, NetworkUtilityGetLocalAddress,
                          testing::ValuesIn(TestEnvironment::getIpVersionsForTest()),
                          TestUtility::ipTestParamsToString);
 
+ACTION_P(SetArg2Int, val) { *(static_cast<int*>(arg2)) = val; }
+
+ACTION_P(SetArg2Uint32, val) { *(static_cast<uint32_t*>(arg2)) = val; }
+
+ACTION_P(SetArg1Sockaddr, val) {
+  const sockaddr_in& sin = reinterpret_cast<const sockaddr_in&>(val);
+  (reinterpret_cast<sockaddr_in*>(arg1))->sin_addr = sin.sin_addr;
+  (reinterpret_cast<sockaddr_in*>(arg1))->sin_family = sin.sin_family;
+  (reinterpret_cast<sockaddr_in*>(arg1))->sin_port = sin.sin_port;
+}
+
+ACTION_P(SetArg1Sockaddr6, val) {
+  const sockaddr_in6& sin6 = reinterpret_cast<const sockaddr_in6&>(val);
+  (reinterpret_cast<sockaddr_in6*>(arg1))->sin6_addr = sin6.sin6_addr;
+  (reinterpret_cast<sockaddr_in6*>(arg1))->sin6_family = sin6.sin6_family;
+  (reinterpret_cast<sockaddr_in6*>(arg1))->sin6_port = sin6.sin6_port;
+}
+
+ACTION_P(SetArg2Sockaddr, val) {
+  const sockaddr_in& sin = reinterpret_cast<const sockaddr_in&>(val);
+  (static_cast<sockaddr_in*>(arg2))->sin_addr = sin.sin_addr;
+  (static_cast<sockaddr_in*>(arg2))->sin_family = sin.sin_family;
+  (static_cast<sockaddr_in*>(arg2))->sin_port = sin.sin_port;
+}
+
+ACTION_P(SetArg2Sockaddr6, val) {
+  const sockaddr_in6& sin6 = reinterpret_cast<const sockaddr_in6&>(val);
+  (static_cast<sockaddr_in6*>(arg2))->sin6_addr = sin6.sin6_addr;
+  (static_cast<sockaddr_in6*>(arg2))->sin6_family = sin6.sin6_family;
+  (static_cast<sockaddr_in6*>(arg2))->sin6_port = sin6.sin6_port;
+}
+
 TEST_P(NetworkUtilityGetLocalAddress, GetLocalAddress) {
-  EXPECT_NE(nullptr, Utility::getLocalAddress(GetParam()));
+  auto ip_version = GetParam();
+  auto local_address = Utility::getLocalAddress(ip_version);
+  EXPECT_NE(nullptr, local_address);
+  EXPECT_EQ(ip_version, local_address->ip()->version());
 }
 
 TEST(NetworkUtility, GetOriginalDst) {
@@ -180,64 +312,146 @@ TEST(NetworkUtility, GetOriginalDst) {
   EXPECT_CALL(socket, addressType()).WillOnce(testing::Return(Address::Type::Pipe));
 #endif
   EXPECT_EQ(nullptr, Utility::getOriginalDst(socket));
+
+#ifdef SOL_IP
+  sockaddr_storage storage;
+  testing::NiceMock<Api::MockOsSysCalls> os_sys_calls;
+  TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> os_calls(&os_sys_calls);
+  EXPECT_CALL(socket, addressType()).WillRepeatedly(Return(Address::Type::Ip));
+
+  auto& sin = reinterpret_cast<sockaddr_in&>(storage);
+  sin.sin_family = AF_INET;
+  sin.sin_port = htons(9527);
+  sin.sin_addr.s_addr = inet_addr("12.34.56.78");
+  EXPECT_CALL(socket, ipVersion()).WillRepeatedly(Return(Address::IpVersion::v4));
+  // Socket gets original dst from SO_ORIGINAL_DST while connection tracking enabled
+  EXPECT_CALL(socket, getSocketOption(Eq(SOL_IP), Eq(SO_ORIGINAL_DST), _, _))
+      .WillOnce(DoAll(SetArg2Sockaddr(storage), Return(Api::SysCallIntResult{0, 0})));
+  EXPECT_EQ("12.34.56.78:9527", Utility::getOriginalDst(socket)->asString());
+#ifndef WIN32
+  // Transparent socket gets original dst from local address while connection tracking disabled
+  EXPECT_CALL(socket, getSocketOption(Eq(SOL_IP), Eq(SO_ORIGINAL_DST), _, _))
+      .WillOnce(Return(Api::SysCallIntResult{-1, 0}));
+  EXPECT_CALL(os_sys_calls, supportsIpTransparent()).WillOnce(Return(true));
+  EXPECT_CALL(socket, getSocketOption(Eq(SOL_IP), Eq(IP_TRANSPARENT), _, _))
+      .WillOnce(DoAll(SetArg2Int(1), Return(Api::SysCallIntResult{0, 0})));
+  EXPECT_CALL(os_sys_calls, getsockname(_, _, _))
+      .WillOnce(DoAll(SetArg1Sockaddr(storage), SetArg2Uint32(sizeof(sockaddr_in)),
+                      Return(Api::SysCallIntResult{0, 0})));
+  EXPECT_EQ("12.34.56.78:9527", Utility::getOriginalDst(socket)->asString());
+  // Non-transparent socket fails to get original dst while connection tracking disabled
+  EXPECT_CALL(socket, getSocketOption(Eq(SOL_IP), Eq(SO_ORIGINAL_DST), _, _))
+      .WillOnce(Return(Api::SysCallIntResult{-1, 0}));
+  EXPECT_CALL(os_sys_calls, supportsIpTransparent()).WillOnce(Return(true));
+  EXPECT_CALL(socket, getSocketOption(Eq(SOL_IP), Eq(IP_TRANSPARENT), _, _))
+      .WillOnce(DoAll(SetArg2Int(0), Return(Api::SysCallIntResult{0, 0})));
+  EXPECT_EQ(nullptr, Utility::getOriginalDst(socket));
+#endif // WIN32
+
+  auto& sin6 = reinterpret_cast<sockaddr_in6&>(storage);
+  sin6.sin6_family = AF_INET6;
+  sin6.sin6_port = htons(9527);
+  EXPECT_EQ(1, inet_pton(AF_INET6, "12::34", &sin6.sin6_addr));
+  EXPECT_CALL(socket, ipVersion()).WillRepeatedly(Return(Address::IpVersion::v6));
+  // Socket gets original dst from SO_ORIGINAL_DST while connection tracking enabled
+  EXPECT_CALL(socket, getSocketOption(Eq(SOL_IPV6), Eq(IP6T_SO_ORIGINAL_DST), _, _))
+      .WillOnce(DoAll(SetArg2Sockaddr6(storage), Return(Api::SysCallIntResult{0, 0})));
+  EXPECT_EQ("[12::34]:9527", Utility::getOriginalDst(socket)->asString());
+#ifndef WIN32
+  // Transparent socket gets original dst from local address while connection tracking disabled
+  EXPECT_CALL(socket, getSocketOption(Eq(SOL_IPV6), Eq(IP6T_SO_ORIGINAL_DST), _, _))
+      .WillOnce(Return(Api::SysCallIntResult{-1, 0}));
+  EXPECT_CALL(os_sys_calls, supportsIpTransparent()).WillOnce(Return(true));
+  EXPECT_CALL(socket, getSocketOption(Eq(SOL_IPV6), Eq(IPV6_TRANSPARENT), _, _))
+      .WillOnce(DoAll(SetArg2Int(1), Return(Api::SysCallIntResult{0, 0})));
+  EXPECT_CALL(os_sys_calls, getsockname(_, _, _))
+      .WillOnce(DoAll(SetArg1Sockaddr6(storage), SetArg2Uint32(sizeof(sockaddr_in6)),
+                      Return(Api::SysCallIntResult{0, 0})));
+  EXPECT_EQ("[12::34]:9527", Utility::getOriginalDst(socket)->asString());
+  // Non-transparent socket fails to get original dst while connection tracking disabled
+  EXPECT_CALL(socket, getSocketOption(Eq(SOL_IPV6), Eq(IP6T_SO_ORIGINAL_DST), _, _))
+      .WillOnce(Return(Api::SysCallIntResult{-1, 0}));
+  EXPECT_CALL(os_sys_calls, supportsIpTransparent()).WillOnce(Return(true));
+  EXPECT_CALL(socket, getSocketOption(Eq(SOL_IPV6), Eq(IPV6_TRANSPARENT), _, _))
+      .WillOnce(DoAll(SetArg2Int(0), Return(Api::SysCallIntResult{0, 0})));
+  EXPECT_EQ(nullptr, Utility::getOriginalDst(socket));
+#endif // WIN32
+
+#endif // SOL_IP
 }
 
 TEST(NetworkUtility, LocalConnection) {
-  Network::Address::InstanceConstSharedPtr local_addr;
-  Network::Address::InstanceConstSharedPtr remote_addr;
-
   testing::NiceMock<Network::MockConnectionSocket> socket;
 
-  EXPECT_CALL(socket, localAddress()).WillRepeatedly(testing::ReturnRef(local_addr));
-  EXPECT_CALL(socket, remoteAddress()).WillRepeatedly(testing::ReturnRef(remote_addr));
+  socket.connection_info_provider_->setLocalAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1"));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::PipeInstance>("/pipe/path"));
+  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  local_addr = std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1");
-  remote_addr = std::make_shared<Network::Address::PipeInstance>("/pipe/path");
-  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setLocalAddress(
+      std::make_shared<Network::Address::PipeInstance>("/pipe/path"));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::PipeInstance>("/pipe/path"));
+  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  local_addr = std::make_shared<Network::Address::PipeInstance>("/pipe/path");
-  remote_addr = std::make_shared<Network::Address::PipeInstance>("/pipe/path");
-  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setLocalAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1"));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1"));
+  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  local_addr = std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1");
-  remote_addr = std::make_shared<Network::Address::Ipv4Instance>("127.0.0.1");
-  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setLocalAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("127.0.0.2"));
+  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  local_addr = std::make_shared<Network::Address::Ipv4Instance>("127.0.0.2");
-  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setLocalAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("4.4.4.4"));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("8.8.8.8"));
+  EXPECT_FALSE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  local_addr = std::make_shared<Network::Address::Ipv4Instance>("4.4.4.4");
-  remote_addr = std::make_shared<Network::Address::Ipv4Instance>("8.8.8.8");
-  EXPECT_FALSE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setLocalAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("4.4.4.4"));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("4.4.4.4"));
+  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  local_addr = std::make_shared<Network::Address::Ipv4Instance>("4.4.4.4");
-  remote_addr = std::make_shared<Network::Address::Ipv4Instance>("4.4.4.4");
-  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setLocalAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("4.4.4.4", 1234));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv4Instance>("4.4.4.4", 4321));
+  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  local_addr = std::make_shared<Network::Address::Ipv4Instance>("4.4.4.4", 1234);
-  remote_addr = std::make_shared<Network::Address::Ipv4Instance>("4.4.4.4", 4321);
-  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setLocalAddress(
+      std::make_shared<Network::Address::Ipv6Instance>("::1"));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv6Instance>("::1"));
+  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  local_addr = std::make_shared<Network::Address::Ipv6Instance>("::1");
-  remote_addr = std::make_shared<Network::Address::Ipv6Instance>("::1");
-  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setLocalAddress(
+      std::make_shared<Network::Address::Ipv6Instance>("::2"));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv6Instance>("::1"));
+  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  local_addr = std::make_shared<Network::Address::Ipv6Instance>("::2");
-  remote_addr = std::make_shared<Network::Address::Ipv6Instance>("::1");
-  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv6Instance>("::3"));
+  EXPECT_FALSE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  remote_addr = std::make_shared<Network::Address::Ipv6Instance>("::3");
-  EXPECT_FALSE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv6Instance>("::2"));
+  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  remote_addr = std::make_shared<Network::Address::Ipv6Instance>("::2");
-  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv6Instance>("::2", 4321));
+  socket.connection_info_provider_->setLocalAddress(
+      std::make_shared<Network::Address::Ipv6Instance>("::2", 1234));
+  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 
-  remote_addr = std::make_shared<Network::Address::Ipv6Instance>("::2", 4321);
-  local_addr = std::make_shared<Network::Address::Ipv6Instance>("::2", 1234);
-  EXPECT_TRUE(Utility::isSameIpOrLoopback(socket));
-
-  remote_addr = std::make_shared<Network::Address::Ipv6Instance>("fd00::");
-  EXPECT_FALSE(Utility::isSameIpOrLoopback(socket));
+  socket.connection_info_provider_->setRemoteAddress(
+      std::make_shared<Network::Address::Ipv6Instance>("fd00::"));
+  EXPECT_FALSE(Utility::isSameIpOrLoopback(socket.connectionInfoProvider()));
 }
 
 TEST(NetworkUtility, InternalAddress) {
@@ -352,6 +566,14 @@ TEST(NetworkUtility, AddressToProtobufAddress) {
     EXPECT_EQ(true, proto_address.has_pipe());
     EXPECT_EQ("/hello", proto_address.pipe().path());
   }
+  {
+    envoy::config::core::v3::Address proto_address;
+    Address::EnvoyInternalInstance address("internal_address", "endpoint_id");
+    Utility::addressToProtobufAddress(address, proto_address);
+    EXPECT_TRUE(proto_address.has_envoy_internal_address());
+    EXPECT_EQ("internal_address", proto_address.envoy_internal_address().server_listener_name());
+    EXPECT_EQ("endpoint_id", proto_address.envoy_internal_address().endpoint_id());
+  }
 }
 
 TEST(NetworkUtility, ProtobufAddressSocketType) {
@@ -454,22 +676,29 @@ TEST(PortRangeListTest, Normal) {
   }
 }
 
-// TODO(ccaraman): Support big-endian. These tests operate under the assumption that the machine
-// byte order is little-endian.
 TEST(AbslUint128, TestByteOrder) {
+#if defined(ABSL_IS_BIG_ENDIAN)
+  auto flip_order_for_endianness = [](const absl::uint128& input) {
+    return absl::MakeUint128(__builtin_bswap64(absl::Uint128Low64(input)),
+                             __builtin_bswap64(absl::Uint128High64(input)));
+  };
+#else
+  auto flip_order_for_endianness = [](const absl::uint128& input) { return input; };
+#endif
   {
     Address::Ipv6Instance address("::1");
     uint64_t high = 0x100000000000000;
-    EXPECT_EQ(absl::MakeUint128(high, 0), address.ip()->ipv6()->address());
-    EXPECT_EQ(absl::MakeUint128(high, 0),
+    EXPECT_EQ(flip_order_for_endianness(absl::MakeUint128(high, 0)),
+              address.ip()->ipv6()->address());
+    EXPECT_EQ(flip_order_for_endianness(absl::MakeUint128(high, 0)),
               Utility::Ip6htonl(Utility::Ip6ntohl(address.ip()->ipv6()->address())));
 
     EXPECT_EQ(absl::uint128(1), Utility::Ip6ntohl(address.ip()->ipv6()->address()));
   }
   {
     Address::Ipv6Instance address("1::");
-    EXPECT_EQ(absl::uint128(256), address.ip()->ipv6()->address());
-    EXPECT_EQ(absl::uint128(256),
+    EXPECT_EQ(flip_order_for_endianness(absl::uint128(256)), address.ip()->ipv6()->address());
+    EXPECT_EQ(flip_order_for_endianness(absl::uint128(256)),
               Utility::Ip6htonl(Utility::Ip6ntohl(address.ip()->ipv6()->address())));
 
     uint64_t high = 0x001000000000000;
@@ -479,8 +708,9 @@ TEST(AbslUint128, TestByteOrder) {
     Address::Ipv6Instance address("2001:abcd:ef01:2345:6789:abcd:ef01:234");
     uint64_t low = 0x452301EFCDAB0120;
     uint64_t high = 0x340201EFCDAB8967;
-    EXPECT_EQ(absl::MakeUint128(high, low), address.ip()->ipv6()->address());
-    EXPECT_EQ(absl::MakeUint128(high, low),
+    EXPECT_EQ(flip_order_for_endianness(absl::MakeUint128(high, low)),
+              address.ip()->ipv6()->address());
+    EXPECT_EQ(flip_order_for_endianness(absl::MakeUint128(high, low)),
               Utility::Ip6htonl(Utility::Ip6ntohl(address.ip()->ipv6()->address())));
   }
   {
@@ -494,6 +724,65 @@ TEST(AbslUint128, TestByteOrder) {
     EXPECT_EQ(random_number, Utility::Ip6htonl(Utility::Ip6ntohl(random_number)));
   }
 }
+
+TEST(ResolvedUdpSocketConfig, Warning) {
+  Api::MockOsSysCalls os_sys_calls;
+  TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> os_calls(&os_sys_calls);
+  EXPECT_CALL(os_sys_calls, supportsUdpGro()).WillOnce(Return(false));
+  EXPECT_LOG_CONTAINS(
+      "warn", "GRO requested but not supported by the OS. Check OS config or disable prefer_gro.",
+      ResolvedUdpSocketConfig resolved_config(envoy::config::core::v3::UdpSocketConfig(), true));
+}
+
+#ifndef WIN32
+TEST(PacketLoss, LossTest) {
+  // Create and bind a UDP socket.
+  auto version = TestEnvironment::getIpVersionsForTest()[0];
+  auto kernel_version = version == Network::Address::IpVersion::v4 ? AF_INET : AF_INET6;
+  int fd = socket(kernel_version, SOCK_DGRAM | SOCK_NONBLOCK, IPPROTO_UDP);
+  ASSERT_NE(fd, 0);
+  sockaddr_storage storage;
+  auto& sin = reinterpret_cast<sockaddr_in&>(storage);
+  sin.sin_family = kernel_version;
+  sin.sin_port = 0;
+  EXPECT_EQ(1,
+            inet_pton(kernel_version, Network::Test::getLoopbackAddressUrlString(version).c_str(),
+                      &sin.sin_addr));
+  ASSERT_EQ(0, bind(fd, reinterpret_cast<sockaddr*>(&storage), sizeof(storage)));
+
+  // Get the port.
+  socklen_t storage_len = sizeof(storage);
+  ASSERT_EQ(0, getsockname(fd, reinterpret_cast<sockaddr*>(&storage), &storage_len));
+
+  // Set the buffer size artificially small.
+  int receive_buffer_size = 1000;
+  ASSERT_EQ(
+      0, setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &receive_buffer_size, sizeof(receive_buffer_size)));
+
+  // Send a packet.
+  char buf[2048];
+  memset(buf, 0, ABSL_ARRAYSIZE(buf));
+  EXPECT_EQ(ABSL_ARRAYSIZE(buf), sendto(fd, buf, ABSL_ARRAYSIZE(buf), 0,
+                                        reinterpret_cast<sockaddr*>(&storage), sizeof(storage)));
+
+  // Verify the packet is dropped.
+  IoSocketHandleImpl handle(fd);
+  auto address = Network::Test::getCanonicalLoopbackAddress(version);
+  NiceMock<MockUdpPacketProcessor> processor;
+  MonotonicTime time(std::chrono::seconds(0));
+  uint32_t packets_dropped = 0;
+  Utility::readFromSocket(handle, *address, processor, time, false, &packets_dropped);
+  EXPECT_EQ(1, packets_dropped);
+
+  // Send another packet.
+  EXPECT_EQ(ABSL_ARRAYSIZE(buf), sendto(fd, buf, ABSL_ARRAYSIZE(buf), 0,
+                                        reinterpret_cast<sockaddr*>(&storage), sizeof(storage)));
+
+  // Make sure the drop count is now 2.
+  Utility::readFromSocket(handle, *address, processor, time, false, &packets_dropped);
+  EXPECT_EQ(2, packets_dropped);
+}
+#endif
 
 } // namespace
 } // namespace Network

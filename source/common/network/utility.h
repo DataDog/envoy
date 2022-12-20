@@ -9,6 +9,8 @@
 #include "envoy/network/connection.h"
 #include "envoy/network/listener.h"
 
+#include "source/common/common/statusor.h"
+
 #include "absl/strings/string_view.h"
 
 namespace Envoy {
@@ -51,13 +53,37 @@ public:
                              Buffer::InstancePtr buffer, MonotonicTime receive_time) PURE;
 
   /**
-   * The expected max size of the packet to be read. If it's smaller than
-   * actually packets received, the payload will be truncated.
+   * Called whenever datagrams are dropped due to overflow or truncation.
+   * @param dropped supplies the number of dropped datagrams.
    */
-  virtual uint64_t maxPacketSize() const PURE;
+  virtual void onDatagramsDropped(uint32_t dropped) PURE;
+
+  /**
+   * The expected max size of the datagram to be read. If it's smaller than
+   * the size of datagrams received, they will be dropped.
+   */
+  virtual uint64_t maxDatagramSize() const PURE;
+
+  /**
+   * An estimated number of packets to read in each read event.
+   */
+  virtual size_t numPacketsExpectedPerEventLoop() const PURE;
 };
 
-static const uint64_t MAX_UDP_PACKET_SIZE = 1500;
+static const uint64_t DEFAULT_UDP_MAX_DATAGRAM_SIZE = 1500;
+static const uint64_t NUM_DATAGRAMS_PER_RECEIVE = 16;
+static const uint64_t MAX_NUM_PACKETS_PER_EVENT_LOOP = 6000;
+
+/**
+ * Wrapper which resolves UDP socket proto config with defaults.
+ */
+struct ResolvedUdpSocketConfig {
+  ResolvedUdpSocketConfig(const envoy::config::core::v3::UdpSocketConfig& config,
+                          bool prefer_gro_default);
+
+  uint64_t max_rx_datagram_size_;
+  bool prefer_gro_;
+};
 
 /**
  * Common network utility routines.
@@ -75,6 +101,14 @@ public:
    * @throw EnvoyException if url is invalid.
    */
   static Address::InstanceConstSharedPtr resolveUrl(const std::string& url);
+
+  /**
+   * Determine the socket type for a URL.
+   *
+   * @param url supplies the url to resolve.
+   * @return StatusOr<Socket::Type> of the socket type, or an error status if url is invalid.
+   */
+  static StatusOr<Socket::Type> socketTypeFromUrl(const std::string& url);
 
   /**
    * Match a URL to the TCP scheme
@@ -98,43 +132,27 @@ public:
   static bool urlIsUnixScheme(absl::string_view url);
 
   /**
-   * Parses the host from a TCP URL
-   * @param the URL to parse host from
-   * @return std::string the parsed host
+   * Parse an internet host address (IPv4 or IPv6) and create an Instance from it. The address must
+   * not include a port number. Throws EnvoyException if unable to parse the address.
+   * @param ip_address string to be parsed as an internet address.
+   * @param port optional port to include in Instance created from ip_address, 0 by default.
+   * @param v6only disable IPv4-IPv6 mapping for IPv6 addresses?
+   * @return pointer to the Instance.
+   * @throw EnvoyException in case of a malformed IP address.
    */
-  static std::string hostFromTcpUrl(const std::string& url);
-
-  /**
-   * Parses the port from a TCP URL
-   * @param the URL to parse port from
-   * @return uint32_t the parsed port
-   */
-  static uint32_t portFromTcpUrl(const std::string& url);
-
-  /**
-   * Parses the host from a UDP URL
-   * @param the URL to parse host from
-   * @return std::string the parsed host
-   */
-  static std::string hostFromUdpUrl(const std::string& url);
-
-  /**
-   * Parses the port from a UDP URL
-   * @param the URL to parse port from
-   * @return uint32_t the parsed port
-   */
-  static uint32_t portFromUdpUrl(const std::string& url);
+  static Address::InstanceConstSharedPtr
+  parseInternetAddress(const std::string& ip_address, uint16_t port = 0, bool v6only = true);
 
   /**
    * Parse an internet host address (IPv4 or IPv6) and create an Instance from it. The address must
-   * not include a port number. Throws EnvoyException if unable to parse the address.
+   * not include a port number.
    * @param ip_address string to be parsed as an internet address.
    * @param port optional port to include in Instance created from ip_address, 0 by default.
    * @param v6only disable IPv4-IPv6 mapping for IPv6 addresses?
    * @return pointer to the Instance, or nullptr if unable to parse the address.
    */
   static Address::InstanceConstSharedPtr
-  parseInternetAddress(const std::string& ip_address, uint16_t port = 0, bool v6only = true);
+  parseInternetAddressNoThrow(const std::string& ip_address, uint16_t port = 0, bool v6only = true);
 
   /**
    * Parse an internet host address (IPv4 or IPv6) AND port, and create an Instance from it. Throws
@@ -152,9 +170,21 @@ public:
    *        - "[1234:5678::9]:443"
    * @param v6only disable IPv4-IPv6 mapping for IPv6 addresses?
    * @return pointer to the Instance.
+   * @throw EnvoyException in case of a malformed IP address.
    */
   static Address::InstanceConstSharedPtr parseInternetAddressAndPort(const std::string& ip_address,
                                                                      bool v6only = true);
+
+  /**
+   * Create a new Instance from an internet host address (IPv4 or IPv6) and port.
+   * @param ip_addr string to be parsed as an internet address and port. Examples:
+   *        - "1.2.3.4:80"
+   *        - "[1234:5678::9]:443"
+   * @param v6only disable IPv4-IPv6 mapping for IPv6 addresses?
+   * @return pointer to the Instance, or a nullptr in case of a malformed IP address.
+   */
+  static Address::InstanceConstSharedPtr
+  parseInternetAddressAndPortNoThrow(const std::string& ip_address, bool v6only = true);
 
   /**
    * Get the local address of the first interface address that is of type
@@ -169,7 +199,7 @@ public:
    * Determine whether this is a local connection.
    * @return bool the address is a local connection.
    */
-  static bool isSameIpOrLoopback(const ConnectionSocket& socket);
+  static bool isSameIpOrLoopback(const ConnectionInfoProvider& socket);
 
   /**
    * Determine whether this is an internal (RFC1918) address.
@@ -312,23 +342,27 @@ public:
    * @param udp_packet_processor is the callback to receive the packet.
    * @param receive_time is the timestamp passed to udp_packet_processor for the
    * receive time of the packet.
+   * @param prefer_gro supplies whether to use GRO if the OS supports it.
    * @param packets_dropped is the output parameter for number of packets dropped in kernel. If the
    * caller is not interested in it, nullptr can be passed in.
    */
   static Api::IoCallUint64Result readFromSocket(IoHandle& handle,
                                                 const Address::Instance& local_address,
                                                 UdpPacketProcessor& udp_packet_processor,
-                                                MonotonicTime receive_time,
+                                                MonotonicTime receive_time, bool use_gro,
                                                 uint32_t* packets_dropped);
 
   /**
-   * Read available packets from a given UDP socket and pass the packet to a given
-   * UdpPacketProcessor.
+   * Read some packets from a given UDP socket and pass the packet to a given
+   * UdpPacketProcessor. Read no more than MAX_NUM_PACKETS_PER_EVENT_LOOP packets.
    * @param handle is the UDP socket to read from.
    * @param local_address is the socket's local address used to populate port.
    * @param udp_packet_processor is the callback to receive the packets.
    * @param time_source is the time source used to generate the time stamp of the received packets.
+   * @param prefer_gro supplies whether to use GRO if the OS supports it.
    * @param packets_dropped is the output parameter for number of packets dropped in kernel.
+   * Return the io error encountered or nullptr if no io error but read stopped
+   * because of MAX_NUM_PACKETS_PER_EVENT_LOOP.
    *
    * TODO(mattklein123): Allow the number of packets read to be limited for fairness. Currently
    *                     this function will always return an error, even if EAGAIN. In the future
@@ -340,7 +374,8 @@ public:
   static Api::IoErrorPtr readPacketsFromSocket(IoHandle& handle,
                                                const Address::Instance& local_address,
                                                UdpPacketProcessor& udp_packet_processor,
-                                               TimeSource& time_source, uint32_t& packets_dropped);
+                                               TimeSource& time_source, bool prefer_gro,
+                                               uint32_t& packets_dropped);
 
 private:
   static void throwWithMalformedIp(absl::string_view ip_address);
@@ -353,6 +388,15 @@ private:
    * @return the absl::uint128 of the input having the bytes flipped.
    */
   static absl::uint128 flipOrder(const absl::uint128& input);
+};
+
+/**
+ * Log formatter for an address.
+ */
+struct AddressStrFormatter {
+  void operator()(std::string* out, const Network::Address::InstanceConstSharedPtr& instance) {
+    out->append(instance->asString());
+  }
 };
 
 } // namespace Network

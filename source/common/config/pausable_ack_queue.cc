@@ -1,8 +1,8 @@
-#include "common/config/pausable_ack_queue.h"
+#include "source/common/config/pausable_ack_queue.h"
 
 #include <list>
 
-#include "common/common/assert.h"
+#include "source/common/common/assert.h"
 
 namespace Envoy {
 namespace Config {
@@ -20,14 +20,16 @@ bool PausableAckQueue::empty() {
   return true;
 }
 
+// In the event of a reconnection, clear all the cached nonces.
+void PausableAckQueue::clear() { storage_.clear(); }
+
 const UpdateAck& PausableAckQueue::front() {
   for (const auto& entry : storage_) {
     if (pauses_[entry.type_url_] == 0) {
       return entry;
     }
   }
-  RELEASE_ASSERT(false, "front() on an empty queue is undefined behavior!");
-  NOT_REACHED_GCOVR_EXCL_LINE;
+  PANIC("front() on an empty queue is undefined behavior!");
 }
 
 UpdateAck PausableAckQueue::popFront() {
@@ -38,8 +40,7 @@ UpdateAck PausableAckQueue::popFront() {
       return ret;
     }
   }
-  RELEASE_ASSERT(false, "popFront() on an empty queue is undefined behavior!");
-  NOT_REACHED_GCOVR_EXCL_LINE;
+  PANIC("popFront() on an empty queue is undefined behavior!");
 }
 
 void PausableAckQueue::pause(const std::string& type_url) {

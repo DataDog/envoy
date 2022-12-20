@@ -2,10 +2,9 @@
 
 #include "envoy/stats/stats_macros.h"
 
-#include "common/common/fmt.h"
-#include "common/singleton/const_singleton.h"
-
-#include "extensions/filters/common/rbac/engine_impl.h"
+#include "source/common/common/fmt.h"
+#include "source/common/singleton/const_singleton.h"
+#include "source/extensions/filters/common/rbac/engine_impl.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -14,35 +13,68 @@ namespace Common {
 namespace RBAC {
 
 /**
- * All stats for the RBAC filter. @see stats_macros.h
+ * All stats for the enforced rules in RBAC filter. @see stats_macros.h
  */
-#define ALL_RBAC_FILTER_STATS(COUNTER)                                                             \
+#define ENFORCE_RBAC_FILTER_STATS(COUNTER)                                                         \
   COUNTER(allowed)                                                                                 \
-  COUNTER(denied)                                                                                  \
+  COUNTER(denied)
+
+/**
+ * All stats for the shadow rules in RBAC filter. @see stats_macros.h
+ */
+#define SHADOW_RBAC_FILTER_STATS(COUNTER)                                                          \
   COUNTER(shadow_allowed)                                                                          \
   COUNTER(shadow_denied)
 
 /**
- * Wrapper struct for RBAC filter stats. @see stats_macros.h
+ * Wrapper struct for shadow rules in RBAC filter stats. @see stats_macros.h
  */
 struct RoleBasedAccessControlFilterStats {
-  ALL_RBAC_FILTER_STATS(GENERATE_COUNTER_STRUCT)
+  ENFORCE_RBAC_FILTER_STATS(GENERATE_COUNTER_STRUCT)
+  SHADOW_RBAC_FILTER_STATS(GENERATE_COUNTER_STRUCT)
 };
 
-RoleBasedAccessControlFilterStats generateStats(const std::string& prefix, Stats::Scope& scope);
+RoleBasedAccessControlFilterStats
+generateStats(const std::string& prefix, const std::string& shadow_prefix, Stats::Scope& scope);
 
 template <class ConfigType>
-std::unique_ptr<RoleBasedAccessControlEngineImpl> createEngine(const ConfigType& config) {
-  return config.has_rules() ? std::make_unique<RoleBasedAccessControlEngineImpl>(
-                                  config.rules(), EnforcementMode::Enforced)
-                            : nullptr;
+std::unique_ptr<RoleBasedAccessControlEngine>
+createEngine(const ConfigType& config, Server::Configuration::ServerFactoryContext& context,
+             ProtobufMessage::ValidationVisitor& validation_visitor,
+             ActionValidationVisitor& action_validation_visitor) {
+  if (config.has_matcher()) {
+    if (config.has_rules()) {
+      ENVOY_LOG_MISC(warn, "RBAC rules are ignored when matcher is configured");
+    }
+    return std::make_unique<RoleBasedAccessControlMatcherEngineImpl>(
+        config.matcher(), context, action_validation_visitor, EnforcementMode::Enforced);
+  }
+  if (config.has_rules()) {
+    return std::make_unique<RoleBasedAccessControlEngineImpl>(config.rules(), validation_visitor,
+                                                              EnforcementMode::Enforced);
+  }
+
+  return nullptr;
 }
 
 template <class ConfigType>
-std::unique_ptr<RoleBasedAccessControlEngineImpl> createShadowEngine(const ConfigType& config) {
-  return config.has_shadow_rules() ? std::make_unique<RoleBasedAccessControlEngineImpl>(
-                                         config.shadow_rules(), EnforcementMode::Shadow)
-                                   : nullptr;
+std::unique_ptr<RoleBasedAccessControlEngine>
+createShadowEngine(const ConfigType& config, Server::Configuration::ServerFactoryContext& context,
+                   ProtobufMessage::ValidationVisitor& validation_visitor,
+                   ActionValidationVisitor& action_validation_visitor) {
+  if (config.has_shadow_matcher()) {
+    if (config.has_shadow_rules()) {
+      ENVOY_LOG_MISC(warn, "RBAC shadow rules are ignored when shadow matcher is configured");
+    }
+    return std::make_unique<RoleBasedAccessControlMatcherEngineImpl>(
+        config.shadow_matcher(), context, action_validation_visitor, EnforcementMode::Shadow);
+  }
+  if (config.has_shadow_rules()) {
+    return std::make_unique<RoleBasedAccessControlEngineImpl>(
+        config.shadow_rules(), validation_visitor, EnforcementMode::Shadow);
+  }
+
+  return nullptr;
 }
 
 std::string responseDetail(const std::string& policy_id);

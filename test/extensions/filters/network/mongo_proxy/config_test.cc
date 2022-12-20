@@ -4,7 +4,7 @@
 #include "envoy/extensions/filters/network/mongo_proxy/v3/mongo_proxy.pb.validate.h"
 #include "envoy/type/v3/percent.pb.h"
 
-#include "extensions/filters/network/mongo_proxy/config.h"
+#include "source/extensions/filters/network/mongo_proxy/config.h"
 
 #include "test/mocks/server/factory_context.h"
 #include "test/test_common/utility.h"
@@ -95,8 +95,7 @@ TEST(MongoFilterConfigTest, InvalidExtraProperty) {
 }
 
 TEST(MongoFilterConfigTest, EmptyConfig) {
-  handleInvalidConfiguration(
-      "{}", R"(StatPrefix: \["value length must be at least " '\\x01' " runes"\])");
+  handleInvalidConfiguration("{}", "StatPrefix: value length must be at least 1 characters");
 }
 
 TEST(MongoFilterConfigTest, InvalidFaultsEmptyConfig) {
@@ -132,7 +131,7 @@ TEST(MongoFilterConfigTest, InvalidFaultsNegativeMs) {
     fixed_delay: -1s
   )EOF";
 
-  handleInvalidConfiguration(yaml_string, R"(FixedDelay: \["value must be greater than " "0s"\])");
+  handleInvalidConfiguration(yaml_string, "FixedDelay: value must be greater than 0s");
 }
 
 TEST(MongoFilterConfigTest, InvalidFaultsDelayPercent) {
@@ -187,8 +186,7 @@ TEST(MongoFilterConfigTest, InvalidFaultsType) {
       fixed_delay: 0s
     )EOF";
 
-    handleInvalidConfiguration(yaml_string,
-                               R"(FixedDelay: \["value must be greater than " "0s"\])");
+    handleInvalidConfiguration(yaml_string, "FixedDelay: value must be greater than 0s");
   }
 }
 
@@ -226,16 +224,6 @@ TEST(MongoFilterConfigTest, CorrectFaultConfigurationInProto) {
   Network::MockConnection connection;
   EXPECT_CALL(connection, addFilter(_));
   cb(connection);
-}
-
-// Test that the deprecated extension name still functions.
-TEST(MongoFilterConfigTest, DEPRECATED_FEATURE_TEST(DeprecatedExtensionFilterName)) {
-  const std::string deprecated_name = "envoy.mongo_proxy";
-
-  ASSERT_NE(
-      nullptr,
-      Registry::FactoryRegistry<Server::Configuration::NamedNetworkFilterConfigFactory>::getFactory(
-          deprecated_name));
 }
 
 } // namespace MongoProxy

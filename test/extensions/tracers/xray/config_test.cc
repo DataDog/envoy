@@ -3,7 +3,7 @@
 #include "envoy/config/trace/v3/xray.pb.validate.h"
 #include "envoy/registry/registry.h"
 
-#include "extensions/tracers/xray/config.h"
+#include "source/extensions/tracers/xray/config.h"
 
 #include "test/mocks/server/instance.h"
 #include "test/mocks/server/tracer_factory.h"
@@ -28,7 +28,7 @@ TEST(XRayTracerConfigTest, XRayHttpTracerWithTypedConfig) {
   http:
     name: xray
     typed_config:
-      "@type": type.googleapis.com/envoy.config.trace.v2alpha.XRayConfig
+      "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
       daemon_endpoint:
         protocol: UDP
         address: 127.0.0.1
@@ -43,7 +43,7 @@ TEST(XRayTracerConfigTest, XRayHttpTracerWithTypedConfig) {
   XRayTracerFactory factory;
   auto message = Config::Utility::translateToFactoryConfig(
       configuration.http(), ProtobufMessage::getStrictValidationVisitor(), factory);
-  Tracing::HttpTracerSharedPtr xray_tracer = factory.createHttpTracer(*message, context);
+  auto xray_tracer = factory.createTracerDriver(*message, context);
   ASSERT_NE(nullptr, xray_tracer);
 }
 
@@ -62,7 +62,7 @@ TEST(XRayTracerConfigTest, XRayHttpTracerWithInvalidFileName) {
   http:
     name: xray
     typed_config:
-      "@type": type.googleapis.com/envoy.config.trace.v2alpha.XRayConfig
+      "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
       daemon_endpoint:
         protocol: UDP
         address: 127.0.0.1
@@ -78,7 +78,7 @@ TEST(XRayTracerConfigTest, XRayHttpTracerWithInvalidFileName) {
   auto message = Config::Utility::translateToFactoryConfig(
       configuration.http(), ProtobufMessage::getStrictValidationVisitor(), factory);
 
-  Tracing::HttpTracerSharedPtr xray_tracer = factory.createHttpTracer(*message, context);
+  auto xray_tracer = factory.createTracerDriver(*message, context);
   ASSERT_NE(nullptr, xray_tracer);
 }
 
@@ -88,7 +88,7 @@ TEST(XRayTracerConfigTest, ProtocolNotUDPThrows) {
   http:
     name: xray
     typed_config:
-      "@type": type.googleapis.com/envoy.config.trace.v2alpha.XRayConfig
+      "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
       daemon_endpoint:
         protocol: TCP
         address: 127.0.0.1
@@ -104,7 +104,7 @@ TEST(XRayTracerConfigTest, ProtocolNotUDPThrows) {
   auto message = Config::Utility::translateToFactoryConfig(
       configuration.http(), ProtobufMessage::getStrictValidationVisitor(), factory);
 
-  ASSERT_THROW(factory.createHttpTracer(*message, context), EnvoyException);
+  ASSERT_THROW(factory.createTracerDriver(*message, context), EnvoyException);
 }
 
 TEST(XRayTracerConfigTest, UsingNamedPortThrows) {
@@ -113,7 +113,7 @@ TEST(XRayTracerConfigTest, UsingNamedPortThrows) {
   http:
     name: xray
     typed_config:
-      "@type": type.googleapis.com/envoy.config.trace.v2alpha.XRayConfig
+      "@type": type.googleapis.com/envoy.config.trace.v3.XRayConfig
       daemon_endpoint:
         protocol: UDP
         address: 127.0.0.1
@@ -129,7 +129,7 @@ TEST(XRayTracerConfigTest, UsingNamedPortThrows) {
   auto message = Config::Utility::translateToFactoryConfig(
       configuration.http(), ProtobufMessage::getStrictValidationVisitor(), factory);
 
-  ASSERT_THROW(factory.createHttpTracer(*message, context), EnvoyException);
+  ASSERT_THROW(factory.createTracerDriver(*message, context), EnvoyException);
 }
 
 TEST(XRayTracerConfigTest, XRayHttpTracerWithSegmentFieldsTypedConfig) {
@@ -162,7 +162,7 @@ TEST(XRayTracerConfigTest, XRayHttpTracerWithSegmentFieldsTypedConfig) {
   XRayTracerFactory factory;
   auto message = Config::Utility::translateToFactoryConfig(
       configuration.http(), ProtobufMessage::getStrictValidationVisitor(), factory);
-  Tracing::HttpTracerSharedPtr xray_tracer = factory.createHttpTracer(*message, context);
+  auto xray_tracer = factory.createTracerDriver(*message, context);
   ASSERT_NE(nullptr, xray_tracer);
 }
 

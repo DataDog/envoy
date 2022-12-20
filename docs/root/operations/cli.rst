@@ -8,9 +8,9 @@ following are the command line options that Envoy supports.
 
 .. option:: -c <path string>, --config-path <path string>
 
-  *(optional)* The path to the v2 :ref:`JSON/YAML/proto3 configuration
+  *(optional)* The path to the :ref:`JSON/YAML/proto3 configuration
   file <config>`. If this flag is missing, :option:`--config-yaml` is required.
-  This will be parsed as a :ref:`v2 bootstrap configuration file
+  This will be parsed as a :ref:`bootstrap configuration file
   <config_overview_bootstrap>`.
   Valid extensions are ``.json``, ``.yaml``, ``.pb`` and ``.pb_text``, which indicate
   JSON, YAML, `binary proto3
@@ -30,13 +30,6 @@ following are the command line options that Envoy supports.
     .. code-block:: console
 
       ./envoy -c bootstrap.yaml --config-yaml "node: {id: 'node1'}"
-
-.. option:: --bootstrap-version <integer>
-
-   *(optional)* The API version to load the bootstrap as. The value should be a single integer, e.g.
-   to parse the bootstrap configuration as V3, specify ``--bootstrap-version 3``. If unset, Envoy will
-   attempt to load the bootstrap as the previous API version and upgrade it to the latest. If that fails,
-   Envoy will attempt to load the configuration as the latest version.
 
 .. option:: --mode <string>
 
@@ -94,8 +87,8 @@ following are the command line options that Envoy supports.
 .. option:: --component-log-level <string>
 
   *(optional)* The comma separated list of logging level per component. Non developers should generally
-  never set this option. For example, if you want `upstream` component to run at `debug` level and
-  `connection` component to run at `trace` level, you should pass ``upstream:debug,connection:trace`` to
+  never set this option. For example, if you want ``upstream`` component to run at ``debug`` level and
+  ``connection`` component to run at ``trace`` level, you should pass ``upstream:debug,connection:trace`` to
   this flag. See ``ALL_LOGGER_IDS`` in :repo:`/source/common/common/logger.h` for a list of components.
 
 .. option:: --cpuset-threads
@@ -116,9 +109,6 @@ following are the command line options that Envoy supports.
    *(optional)* The format string to use for laying out the log message metadata. If this is not
    set, a default format string ``"[%Y-%m-%d %T.%e][%t][%l][%n] [%g:%#] %v"`` is used.
 
-   When used in conjunction with :option:`--log-format-prefix-with-location` set to 1, the logger can be
-   configured to prefix ``%v`` by a file path and a line number.
-
    When used in conjunction with :option:`--log-format-escaped`, the logger can be configured
    to log in a format that is parsable by log viewers. Known integrations are documented
    in the :ref:`application logging configuration <config_application_logs>` section.
@@ -126,6 +116,8 @@ following are the command line options that Envoy supports.
    The supported format flags are (with example output):
 
    :%v:	The actual message to log ("some user text")
+   :%_:	The actual message to log, but with escaped newlines (from (if using ``%v``) "some user text\nbelow", to "some user text\\nbelow")
+   :%j:	The actual message to log as JSON escaped string (https://tools.ietf.org/html/rfc7159#page-8).
    :%t:	Thread id ("1232")
    :%P:	Process id ("3456")
    :%n:	Logger's name ("filter")
@@ -160,20 +152,12 @@ following are the command line options that Envoy supports.
    :%#: Source line ("123")
    :%!: Source function ("myFunc")
 
-.. option:: --log-format-prefix-with-location <1|0>
-
-   *(optional)* This temporary flag allows replacing all entries of ``"%v"`` in the log format by
-   ``"[%g:%#] %v"``. This flag is provided for migration purposes only. If this is not set, a
-   default value 0 is used.
-
-   **NOTE**: The flag will be removed at 1.17.0 release.
-
 .. option:: --log-format-escaped
 
   *(optional)* This flag enables application log sanitization to escape C-style escape sequences.
   This can be used to prevent a single log line from spanning multiple lines in the underlying log.
   This sanitizes all escape sequences in `this list <https://en.cppreference.com/w/cpp/language/escape>`_.
-  Note that each line's trailing whitespace characters (such as EOL characters) will not be escaped.
+  Note that each line's final EOL character will not be escaped to preserve line format.
 
 .. option:: --restart-epoch <integer>
 
@@ -187,10 +171,10 @@ following are the command line options that Envoy supports.
 .. option:: --enable-fine-grain-logging
 
   *(optional)* Enables fine-grain logger with file level log control and runtime update at administration
-  interface. If enabled, main log macros including `ENVOY_LOG`, `ENVOY_CONN_LOG`, `ENVOY_STREAM_LOG` and
-  `ENVOY_FLUSH_LOG` will use a per-file logger, and the usage doesn't need `Envoy::Logger::Loggable` any 
-  more. The administration interface usage is similar. Please see `Administration interface 
-  <https://www.envoyproxy.io/docs/envoy/latest/operations/admin>`_ for more detail.
+  interface. If enabled, main log macros including ``ENVOY_LOG``, ``ENVOY_CONN_LOG``, ``ENVOY_STREAM_LOG`` and
+  ``ENVOY_FLUSH_LOG`` will use a per-file logger, and the usage doesn't need ``Envoy::Logger::Loggable`` any
+  more. The administration interface usage is similar. Please see :ref:`Administration interface
+  <operations_admin_interface>` for more detail.
 
 .. option:: --socket-path <path string>
 
@@ -336,13 +320,21 @@ following are the command line options that Envoy supports.
   or count occurrences of unknown fields, in the interest of configuration processing speed. If
   :option:`--reject-unknown-dynamic-fields` is set to true, this flag has no effect.
 
+  .. attention::
+
+    In addition to not logging warnings or counting occurrences of unknown fields, setting this
+    option also disables counting and warnings of deprecated fields as well as work-in-progress
+    message and fields. It is *strongly* recommended that this option is not set on at least a
+    small portion of the fleet (staging, canary, etc.) in order to monitor for unknown,
+    deprecated, or work-in-progress usage.
+
 .. option:: --disable-extensions <extension list>
 
   *(optional)* This flag disabled the provided list of comma-separated extension names. Disabled
   extensions cannot be used by static or dynamic configuration, though they are still linked into
   Envoy and may run start-up code or have other runtime effects. Extension names are created by
   joining the extension category and name with a forward slash,
-  e.g. ``grpc_credentials/envoy.grpc_credentials.file_based_metadata``.
+  e.g. ``envoy.grpc_credentials/envoy.grpc_credentials.file_based_metadata``.
 
 .. option:: --version
 
@@ -360,3 +352,16 @@ following are the command line options that Envoy supports.
   * build mode - either ``RELEASE`` or ``DEBUG``,
 
   * TLS library - either ``BoringSSL`` or ``BoringSSL-FIPS``.
+
+.. option:: --enable-core-dump
+
+  *(optional)* This flag is intended for Linux-based systems and it's a no-op for all other platforms.
+  It enables core dumps by invoking `prctl <https://man7.org/linux/man-pages/man2/prctl.2.html>`_ using the
+  PR_SET_DUMPABLE option. This is useful for container environments when using capabilities, given that when
+  Envoy has more capabilities than its base environment core dumping will be disabled by the kernel.
+
+.. option:: --stats-tag
+
+  *(optional)* This flag provides a universal tag for all stats generated by Envoy. The format is ``tag:value``. Only
+  alphanumeric values are allowed for tag names. For tag values all characters are permitted except for '.' (dot).
+  This flag can be repeated multiple times to set multiple universal tags. Multiple values for the same tag name are not allowed.

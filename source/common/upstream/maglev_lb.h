@@ -5,8 +5,8 @@
 #include "envoy/stats/scope.h"
 #include "envoy/stats/stats_macros.h"
 
-#include "common/upstream/thread_aware_lb_impl.h"
-#include "common/upstream/upstream_impl.h"
+#include "source/common/upstream/thread_aware_lb_impl.h"
+#include "source/common/upstream/upstream_impl.h"
 
 namespace Envoy {
 namespace Upstream {
@@ -72,7 +72,7 @@ class MaglevLoadBalancer : public ThreadAwareLoadBalancerBase,
                            Logger::Loggable<Logger::Id::upstream> {
 public:
   MaglevLoadBalancer(
-      const PrioritySet& priority_set, ClusterStats& stats, Stats::Scope& scope,
+      const PrioritySet& priority_set, ClusterLbStats& stats, Stats::Scope& scope,
       Runtime::Loader& runtime, Random::RandomGenerator& random,
       const absl::optional<envoy::config::cluster::v3::Cluster::MaglevLbConfig>& config,
       const envoy::config::cluster::v3::Cluster::CommonLbConfig& common_config);
@@ -99,7 +99,7 @@ private:
 
   static MaglevLoadBalancerStats generateStats(Stats::Scope& scope);
 
-  Stats::ScopePtr scope_;
+  Stats::ScopeSharedPtr scope_;
   MaglevLoadBalancerStats stats_;
   const uint64_t table_size_;
   const bool use_hostname_for_hashing_;

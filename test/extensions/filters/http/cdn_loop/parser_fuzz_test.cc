@@ -1,6 +1,5 @@
-#include "common/common/statusor.h"
-
-#include "extensions/filters/http/cdn_loop/parser.h"
+#include "source/common/common/statusor.h"
+#include "source/extensions/filters/http/cdn_loop/parser.h"
 
 #include "test/fuzz/fuzz_runner.h"
 #include "test/fuzz/utility.h"
@@ -17,7 +16,7 @@ using Envoy::Extensions::HttpFilters::CdnLoop::Parser::ParsedCdnInfoList;
 DEFINE_FUZZER(const uint8_t* buf, size_t len) {
   absl::string_view input(reinterpret_cast<const char*>(buf), len);
   StatusOr<ParsedCdnInfoList> list = parseCdnInfoList(ParseContext(input));
-  if (list) {
+  if (list.ok()) {
     // If we successfully parse input, we should make sure that cdn_ids we find appear in the input
     // string in order.
     size_t start = 0;

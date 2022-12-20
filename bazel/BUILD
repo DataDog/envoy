@@ -1,6 +1,11 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_proto_library")
 load("//bazel:envoy_build_system.bzl", "envoy_package")
 load("//bazel:envoy_internal.bzl", "envoy_select_force_libcpp")
+load("//bazel:utils.bzl", "json_data")
+load("@bazel_skylib//lib:selects.bzl", "selects")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load(":repository_locations.bzl", "REPOSITORY_LOCATIONS_SPEC")
+load("@envoy_api//bazel:repository_locations.bzl", API_REPOSITORY_LOCATIONS_SPEC = "REPOSITORY_LOCATIONS_SPEC")
+load("@envoy_api//bazel:repository_locations_utils.bzl", "load_repository_locations_spec", "merge_dicts")
 
 licenses(["notice"])  # Apache 2
 
@@ -10,7 +15,14 @@ exports_files([
     "gen_sh_test_runner.sh",
     "sh_test_wrapper.sh",
     "test_for_benchmark_wrapper.sh",
+    "repository_locations.bzl",
+    "exported_symbols.txt",
 ])
+
+sh_library(
+    name = "volatile_env",
+    srcs = ["volatile_env.sh"],
+)
 
 genrule(
     name = "gnu_build_id",
@@ -81,6 +93,14 @@ config_setting(
     values = {
         "cpu": "x64_windows",
         "compilation_mode": "fastbuild",
+    },
+)
+
+config_setting(
+    name = "clang_cl_build",
+    values = {
+        "cpu": "x64_windows",
+        "define": "clang_cl=1",
     },
 )
 
@@ -159,10 +179,39 @@ config_setting(
 )
 
 config_setting(
-    name = "gcc_build",
+    name = "clang_pch_build",
+    values = {"define": "ENVOY_CLANG_PCH=1"},
+)
+
+config_setting(
+    name = "gcc_build_gcc",
     flag_values = {
         "@bazel_tools//tools/cpp:compiler": "gcc",
     },
+)
+
+# This is needed due to a Bazel bug (https://github.com/bazelbuild/bazel/issues/12707)
+config_setting(
+    name = "gcc_build_compiler",
+    flag_values = {
+        "@bazel_tools//tools/cpp:compiler": "compiler",
+    },
+)
+
+selects.config_setting_group(
+    name = "gcc_build_compiler_on_linux",
+    match_all = [
+        ":gcc_build_compiler",
+        ":linux",
+    ],
+)
+
+selects.config_setting_group(
+    name = "gcc_build",
+    match_any = [
+        ":gcc_build_gcc",
+        ":gcc_build_compiler_on_linux",
+    ],
 )
 
 config_setting(
@@ -188,7 +237,7 @@ config_setting(
 )
 
 # As select() can't be nested we need these specialized settings to avoid ambiguity when choosing
-# tcmalloc's flavor for x86_64 builds.
+# tcmalloc's flavor for x86_64 and aarch64 builds.
 config_setting(
     name = "disable_tcmalloc_on_linux_x86_64",
     values = {
@@ -214,8 +263,37 @@ config_setting(
 )
 
 config_setting(
+    name = "disable_tcmalloc_on_linux_aarch64",
+    values = {
+        "define": "tcmalloc=disabled",
+        "cpu": "aarch64",
+    },
+)
+
+config_setting(
+    name = "gperftools_tcmalloc_on_linux_aarch64",
+    values = {
+        "define": "tcmalloc=gperftools",
+        "cpu": "aarch64",
+    },
+)
+
+config_setting(
+    name = "debug_tcmalloc_on_linux_aarch64",
+    values = {
+        "define": "tcmalloc=debug",
+        "cpu": "aarch64",
+    },
+)
+
+config_setting(
     name = "disable_signal_trace",
     values = {"define": "signal_trace=disabled"},
+)
+
+config_setting(
+    name = "disable_library_autolink",
+    values = {"define": "library_autolink=disabled"},
 )
 
 config_setting(
@@ -228,18 +306,61 @@ config_setting(
     values = {"define": "deprecated_features=disabled"},
 )
 
-config_setting(
-    name = "disable_hot_restart",
-    values = {"define": "hot_restart=disabled"},
+selects.config_setting_group(
+    name = "disable_hot_restart_or_admin",
+    match_any = [
+        "//bazel:disable_hot_restart",
+        "//bazel:disable_admin_functionality",
+    ],
 )
 
-# Used to avoid conflicting selects https://github.com/bazelbuild/bazel/issues/8323
-alias(
-    name = "disable_hot_restart_or_apple",
-    actual = select({
-        ":apple": ":apple",
-        "//conditions:default": ":disable_hot_restart",
-    }),
+bool_flag(
+    name = "http3",
+    build_setting_default = True,
+    # TODO(keith): make private again https://github.com/bazelbuild/bazel-skylib/issues/404
+    # visibility = ["//visibility:private"],
+)
+
+config_setting(
+    name = "disable_http3_setting",
+    flag_values = {
+        ":http3": "False",
+    },
+    # TODO(keith): make private again https://github.com/bazelbuild/bazel-skylib/issues/404
+    # visibility = ["//visibility:private"],
+)
+
+selects.config_setting_group(
+    name = "disable_http3",
+    match_any = [
+        ":disable_http3_setting",
+        ":boringssl_fips",
+    ],
+)
+
+config_setting(
+    name = "disable_admin_html",
+    values = {"define": "admin_html=disabled"},
+)
+
+config_setting(
+    name = "disable_admin_functionality",
+    values = {"define": "admin_functionality=disabled"},
+)
+
+config_setting(
+    name = "disable_hot_restart_setting",
+    values = {"define": "hot_restart=disabled"},
+    # TODO(keith): make private again https://github.com/bazelbuild/bazel-skylib/issues/404
+    # visibility = ["//visibility:private"],
+)
+
+selects.config_setting_group(
+    name = "disable_hot_restart",
+    match_any = [
+        ":apple",
+        ":disable_hot_restart_setting",
+    ],
 )
 
 config_setting(
@@ -250,11 +371,6 @@ config_setting(
 config_setting(
     name = "enable_path_normalization_by_default",
     values = {"define": "path_normalization_by_default=true"},
-)
-
-config_setting(
-    name = "enable_new_codecs_in_integration_tests",
-    values = {"define": "use_new_codecs_in_integration_tests=true"},
 )
 
 cc_proto_library(
@@ -273,6 +389,11 @@ config_setting(
 )
 
 config_setting(
+    name = "enable_log_fast_debug_assert_in_release",
+    values = {"define": "log_fast_debug_assert_in_release=enabled"},
+)
+
+config_setting(
     name = "disable_known_issue_asserts",
     values = {"define": "disable_known_issue_asserts=true"},
 )
@@ -283,6 +404,11 @@ config_setting(
 )
 
 config_setting(
+    name = "enable_perf_tracing",
+    values = {"define": "perf_tracing=enabled"},
+)
+
+config_setting(
     name = "force_libcpp",
     values = {"define": "force_libcpp=enabled"},
 )
@@ -290,8 +416,8 @@ config_setting(
 config_setting(
     name = "boringssl_fips",
     constraint_values = [
-        "@bazel_tools//platforms:linux",
-        "@bazel_tools//platforms:x86_64",
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
     ],
     values = {"define": "boringssl=fips"},
 )
@@ -304,22 +430,12 @@ config_setting(
 config_setting(
     name = "zlib_ng",
     constraint_values = [
-        "@bazel_tools//platforms:linux",
+        "@platforms//os:linux",
     ],
     values = {"define": "zlib=ng"},
 )
 
-config_setting(
-    name = "enable_quiche",
-    values = {"define": "quiche=enabled"},
-)
-
 # TODO: consider converting WAVM VM support to an extension (https://github.com/envoyproxy/envoy/issues/12574)
-config_setting(
-    name = "wasm_all",
-    values = {"define": "wasm=enabled"},
-)
-
 config_setting(
     name = "wasm_wavm",
     values = {"define": "wasm=wavm"},
@@ -331,8 +447,28 @@ config_setting(
 )
 
 config_setting(
-    name = "wasm_none",
+    name = "wasm_wamr",
+    values = {"define": "wasm=wamr"},
+)
+
+config_setting(
+    name = "wasm_wasmtime",
+    values = {"define": "wasm=wasmtime"},
+)
+
+config_setting(
+    name = "wasm_disabled",
     values = {"define": "wasm=disabled"},
+)
+
+# This config setting enables Universal Header Validator and disables
+# HTTP header compliance checks in codecs.
+# This setting is temporary to transition header validation into UHV without
+# impacting production builds of Envoy.
+# This setting is enabled for the bazel.compile_time_options CI target.
+config_setting(
+    name = "uhv_enabled",
+    values = {"define": "uhv=enabled"},
 )
 
 # Alias pointing to the selected version of BoringSSL:
@@ -343,6 +479,14 @@ alias(
     actual = select({
         "//bazel:boringssl_fips": "@boringssl_fips//:ssl",
         "//conditions:default": "@boringssl//:ssl",
+    }),
+)
+
+alias(
+    name = "boringcrypto",
+    actual = select({
+        "//bazel:boringssl_fips": "@boringssl_fips//:crypto",
+        "//conditions:default": "@boringssl//:crypto",
     }),
 )
 
@@ -389,6 +533,11 @@ config_setting(
 )
 
 config_setting(
+    name = "darwin_arm64",
+    values = {"cpu": "darwin_arm64"},
+)
+
+config_setting(
     name = "ios_i386",
     values = {"cpu": "ios_i386"},
 )
@@ -414,6 +563,11 @@ config_setting(
 )
 
 config_setting(
+    name = "ios_sim_arm64",
+    values = {"cpu": "ios_sim_arm64"},
+)
+
+config_setting(
     name = "ios_arm64e",
     values = {"cpu": "ios_arm64e"},
 )
@@ -421,6 +575,13 @@ config_setting(
 config_setting(
     name = "manual_stamp",
     values = {"define": "manual_stamp=manual_stamp"},
+)
+
+config_setting(
+    name = "android",
+    constraint_values = [
+        "@platforms//os:android",
+    ],
 )
 
 config_setting(
@@ -438,59 +599,203 @@ config_setting(
 
 config_setting(
     name = "libfuzzer",
-    values = {"define": "FUZZING_ENGINE=libfuzzer"},
+    define_values = {"FUZZING_ENGINE": "libfuzzer"},
+)
+
+config_setting(
+    name = "oss_fuzz",
+    define_values = {"FUZZING_ENGINE": "oss-fuzz"},
 )
 
 alias(
+    name = "fuzzing_engine",
+    actual = select({
+        ":libfuzzer": "@rules_fuzzing//fuzzing/engines:libfuzzer",
+        ":oss_fuzz": "@rules_fuzzing_oss_fuzz//:oss_fuzz_engine",
+        "//conditions:default": "//test/fuzz:fuzz_runner_engine",
+    }),
+)
+
+selects.config_setting_group(
     name = "apple",
-    actual = select(
-        {
-            ":darwin": ":darwin",
-            ":darwin_x86_64": ":darwin_x86_64",
-            ":ios_arm64": ":ios_arm64",
-            ":ios_arm64e": ":ios_arm64e",
-            ":ios_armv7": ":ios_armv7",
-            ":ios_armv7s": ":ios_armv7s",
-            ":ios_i386": ":ios_i386",
-            ":ios_x86_64": ":ios_x86_64",
-            # If we're not on an apple platform return a value that will never match in the select() statement calling this
-            # since it would have already been matched above.
-            "//conditions:default": ":darwin",
-        },
-    ),
+    match_any = [
+        ":darwin",
+        ":darwin_arm64",
+        ":darwin_x86_64",
+        ":ios_arm64",
+        ":ios_arm64e",
+        ":ios_armv7",
+        ":ios_armv7s",
+        ":ios_i386",
+        ":ios_sim_arm64",
+        ":ios_x86_64",
+    ],
 )
 
-alias(
+selects.config_setting_group(
+    name = "apple_dbg",
+    match_all = [
+        ":apple",
+        ":dbg_build",
+    ],
+)
+
+selects.config_setting_group(
+    name = "apple_fastbuild",
+    match_all = [
+        ":apple",
+        ":fastbuild_build",
+    ],
+)
+
+selects.config_setting_group(
+    name = "apple_non_opt",
+    match_any = [
+        ":apple_dbg",
+        ":apple_fastbuild",
+    ],
+)
+
+selects.config_setting_group(
     name = "linux",
-    actual = select(
-        {
-            ":linux_x86_64": ":linux_x86_64",
-            ":linux_aarch64": ":linux_aarch64",
-            ":linux_ppc": ":linux_ppc",
-            ":linux_s390x": "linux_s390x",
-            ":linux_mips64": ":linux_mips64",
-            # If we're not on an linux platform return a value that will never match in the select() statement calling this
-            # since it would have already been matched above.
-            "//conditions:default": ":linux_x86_64",
-        },
-    ),
+    match_any = [
+        ":linux_aarch64",
+        ":linux_mips64",
+        ":linux_ppc",
+        ":linux_s390x",
+        ":linux_x86_64",
+    ],
 )
 
-alias(
+selects.config_setting_group(
     name = "x86",
-    actual = select(
-        {
-            ":darwin_x86_64": ":darwin_x86_64",
-            ":ios_x86_64": "ios_x86_64",
-            "linux_x86_64": "linux_x86_64",
-            "windows_x86_64": "windows_x86_64",
-            # If we're not on an x86 platform return a value that will never match in the select() statement calling this since it would have already been matched above.
-            "//conditions:default": ":darwin_x86_64",
-        },
-    ),
+    match_any = [
+        ":darwin_x86_64",
+        ":ios_x86_64",
+        ":linux_x86_64",
+        ":windows_x86_64",
+    ],
+)
+
+selects.config_setting_group(
+    name = "not_x86",
+    match_any = [
+        ":darwin_arm64",
+        ":ios_arm64",
+        ":ios_arm64e",
+        ":ios_armv7",
+        ":ios_armv7s",
+        ":ios_i386",
+        ":ios_sim_arm64",
+        ":linux_aarch64",
+        ":linux_mips64",
+        ":linux_ppc",
+        ":linux_s390x",
+    ],
+)
+
+selects.config_setting_group(
+    name = "not_x86_or_wasm_disabled",
+    match_any = [
+        ":not_x86",
+        ":wasm_disabled",
+    ],
 )
 
 alias(
     name = "remote_jdk11",
     actual = "@bazel_tools//tools/jdk:remote_jdk11",
+)
+
+alias(
+    name = "windows",
+    actual = "@bazel_tools//src/conditions:windows",
+)
+
+json_data(
+    name = "repository_locations",
+    data = load_repository_locations_spec(REPOSITORY_LOCATIONS_SPEC),
+)
+
+json_data(
+    name = "all_repository_locations",
+    data = merge_dicts(
+        load_repository_locations_spec(REPOSITORY_LOCATIONS_SPEC),
+        load_repository_locations_spec(API_REPOSITORY_LOCATIONS_SPEC),
+    ),
+)
+
+platform(
+    name = "android_aarch64",
+    constraint_values = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:android",
+    ],
+)
+
+platform(
+    name = "android_armeabi",
+    constraint_values = [
+        "@platforms//cpu:armv7",
+        "@platforms//os:android",
+    ],
+)
+
+platform(
+    name = "android_x86",
+    constraint_values = [
+        "@platforms//cpu:x86_32",
+        "@platforms//os:android",
+    ],
+)
+
+platform(
+    name = "android_x86_64",
+    constraint_values = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:android",
+    ],
+)
+
+platform(
+    name = "macos_x86_64",
+    constraint_values = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:macos",
+    ],
+)
+
+platform(
+    name = "macos_arm64",
+    constraint_values = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:macos",
+    ],
+)
+
+platform(
+    name = "ios_x86_64_platform",  # TODO(keith): Resolve duplicate name issue
+    constraint_values = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:ios",
+        "@build_bazel_apple_support//constraints:simulator",
+    ],
+)
+
+platform(
+    name = "ios_sim_arm64_platform",  # TODO(keith): Resolve duplicate name issue
+    constraint_values = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:ios",
+        "@build_bazel_apple_support//constraints:simulator",
+    ],
+)
+
+platform(
+    name = "ios_arm64_platform",  # TODO(keith): Resolve duplicate name issue
+    constraint_values = [
+        "@platforms//cpu:arm64",
+        "@platforms//os:ios",
+        "@build_bazel_apple_support//constraints:device",
+    ],
 )

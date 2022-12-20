@@ -3,9 +3,9 @@
 #include "envoy/config/subscription.h"
 #include "envoy/service/discovery/v3/discovery.pb.h"
 
-#include "common/protobuf/utility.h"
+#include "source/common/protobuf/utility.h"
 
-#include "udpa/core/v1/collection_entry.pb.h"
+#include "xds/core/v3/collection_entry.pb.h"
 
 namespace Envoy {
 namespace Config {
@@ -43,6 +43,12 @@ public:
         version, absl::nullopt));
   }
 
+  static DecodedResourceImplPtr
+  fromResource(OpaqueResourceDecoder& resource_decoder,
+               const envoy::service::discovery::v3::Resource& resource) {
+    return std::make_unique<DecodedResourceImpl>(resource_decoder, resource);
+  }
+
   DecodedResourceImpl(OpaqueResourceDecoder& resource_decoder,
                       const envoy::service::discovery::v3::Resource& resource)
       : DecodedResourceImpl(resource_decoder, resource.name(), resource.aliases(),
@@ -52,7 +58,7 @@ public:
                                       DurationUtil::durationToMilliseconds(resource.ttl())))
                                 : absl::nullopt) {}
   DecodedResourceImpl(OpaqueResourceDecoder& resource_decoder,
-                      const udpa::core::v1::CollectionEntry::InlineEntry& inline_entry)
+                      const xds::core::v3::CollectionEntry::InlineEntry& inline_entry)
       : DecodedResourceImpl(resource_decoder, inline_entry.name(),
                             Protobuf::RepeatedPtrField<std::string>(), inline_entry.resource(),
                             true, inline_entry.version(), absl::nullopt) {}

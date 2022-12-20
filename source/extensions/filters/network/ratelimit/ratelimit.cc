@@ -1,13 +1,17 @@
-#include "extensions/filters/network/ratelimit/ratelimit.h"
+#include "source/extensions/filters/network/ratelimit/ratelimit.h"
 
 #include <cstdint>
+#include <iterator>
 #include <string>
+#include <vector>
 
 #include "envoy/extensions/filters/network/ratelimit/v3/rate_limit.pb.h"
 #include "envoy/stats/scope.h"
 
-#include "common/common/fmt.h"
-#include "common/tracing/http_tracer_impl.h"
+#include "source/common/common/fmt.h"
+#include "source/common/formatter/substitution_formatter.h"
+#include "source/common/tracing/http_tracer_impl.h"
+#include "source/extensions/filters/network/well_known_names.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -17,14 +21,42 @@ namespace RateLimitFilter {
 Config::Config(const envoy::extensions::filters::network::ratelimit::v3::RateLimit& config,
                Stats::Scope& scope, Runtime::Loader& runtime)
     : domain_(config.domain()), stats_(generateStats(config.stat_prefix(), scope)),
-      runtime_(runtime), failure_mode_deny_(config.failure_mode_deny()) {
+      runtime_(runtime), failure_mode_deny_(config.failure_mode_deny()),
+      request_headers_(Http::RequestHeaderMapImpl::create()),
+      response_headers_(Http::ResponseHeaderMapImpl::create()),
+      response_trailers_(Http::ResponseTrailerMapImpl::create()) {
   for (const auto& descriptor : config.descriptors()) {
     RateLimit::Descriptor new_descriptor;
     for (const auto& entry : descriptor.entries()) {
       new_descriptor.entries_.push_back({entry.key(), entry.value()});
+      substitution_formatters_.push_back(
+          std::make_unique<Formatter::FormatterImpl>(entry.value(), false));
     }
-    descriptors_.push_back(new_descriptor);
+    original_descriptors_.push_back(new_descriptor);
   }
+}
+
+std::vector<RateLimit::Descriptor>
+Config::applySubstitutionFormatter(StreamInfo::StreamInfo& stream_info) {
+
+  std::vector<RateLimit::Descriptor> dynamic_descriptors;
+  dynamic_descriptors.reserve(descriptors().size());
+  std::vector<std::unique_ptr<Formatter::FormatterImpl>>::iterator formatter_it =
+      substitution_formatters_.begin();
+  for (const RateLimit::Descriptor& descriptor : descriptors()) {
+    RateLimit::Descriptor new_descriptor;
+    new_descriptor.entries_.reserve(descriptor.entries_.size());
+    for (const RateLimit::DescriptorEntry& descriptor_entry : descriptor.entries_) {
+
+      std::string value = descriptor_entry.value_;
+      value = formatter_it->get()->format(*request_headers_.get(), *response_headers_.get(),
+                                          *response_trailers_.get(), stream_info, value);
+      formatter_it++;
+      new_descriptor.entries_.push_back({descriptor_entry.key_, value});
+    }
+    dynamic_descriptors.push_back(new_descriptor);
+  }
+  return dynamic_descriptors;
 }
 
 InstanceStats Config::generateStats(const std::string& name, Stats::Scope& scope) {
@@ -49,8 +81,10 @@ Network::FilterStatus Filter::onNewConnection() {
     config_->stats().active_.inc();
     config_->stats().total_.inc();
     calling_limit_ = true;
-    client_->limit(*this, config_->domain(), config_->descriptors(), Tracing::NullSpan::instance(),
-                   filter_callbacks_->connection().streamInfo());
+    client_->limit(
+        *this, config_->domain(),
+        config_->applySubstitutionFormatter(filter_callbacks_->connection().streamInfo()),
+        Tracing::NullSpan::instance(), filter_callbacks_->connection().streamInfo());
     calling_limit_ = false;
   }
 
@@ -72,7 +106,13 @@ void Filter::onEvent(Network::ConnectionEvent event) {
 
 void Filter::complete(Filters::Common::RateLimit::LimitStatus status,
                       Filters::Common::RateLimit::DescriptorStatusListPtr&&,
-                      Http::ResponseHeaderMapPtr&&, Http::RequestHeaderMapPtr&&) {
+                      Http::ResponseHeaderMapPtr&&, Http::RequestHeaderMapPtr&&, const std::string&,
+                      Filters::Common::RateLimit::DynamicMetadataPtr&& dynamic_metadata) {
+  if (dynamic_metadata != nullptr && !dynamic_metadata->fields().empty()) {
+    filter_callbacks_->connection().streamInfo().setDynamicMetadata(
+        NetworkFilterNames::get().RateLimit, *dynamic_metadata);
+  }
+
   status_ = Status::Complete;
   config_->stats().active_.dec();
 

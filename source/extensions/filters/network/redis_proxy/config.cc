@@ -1,14 +1,15 @@
-#include "extensions/filters/network/redis_proxy/config.h"
+#include "source/extensions/filters/network/redis_proxy/config.h"
 
 #include "envoy/extensions/filters/network/redis_proxy/v3/redis_proxy.pb.h"
 #include "envoy/extensions/filters/network/redis_proxy/v3/redis_proxy.pb.validate.h"
 
-#include "extensions/common/redis/cluster_refresh_manager_impl.h"
-#include "extensions/filters/network/common/redis/client_impl.h"
-#include "extensions/filters/network/common/redis/fault_impl.h"
-#include "extensions/filters/network/redis_proxy/command_splitter_impl.h"
-#include "extensions/filters/network/redis_proxy/proxy_filter.h"
-#include "extensions/filters/network/redis_proxy/router_impl.h"
+#include "source/extensions/common/dynamic_forward_proxy/dns_cache_manager_impl.h"
+#include "source/extensions/common/redis/cluster_refresh_manager_impl.h"
+#include "source/extensions/filters/network/common/redis/client_impl.h"
+#include "source/extensions/filters/network/common/redis/fault_impl.h"
+#include "source/extensions/filters/network/redis_proxy/command_splitter_impl.h"
+#include "source/extensions/filters/network/redis_proxy/proxy_filter.h"
+#include "source/extensions/filters/network/redis_proxy/router_impl.h"
 
 #include "absl/container/flat_hash_set.h"
 
@@ -38,29 +39,21 @@ Network::FilterFactoryCb RedisProxyFilterConfigFactory::createFilterFactoryFromP
 
   Extensions::Common::Redis::ClusterRefreshManagerSharedPtr refresh_manager =
       Extensions::Common::Redis::getClusterRefreshManager(
-          context.singletonManager(), context.dispatcher(), context.clusterManager(),
+          context.singletonManager(), context.mainThreadDispatcher(), context.clusterManager(),
           context.timeSource());
 
-  ProxyFilterConfigSharedPtr filter_config(std::make_shared<ProxyFilterConfig>(
-      proto_config, context.scope(), context.drainDecision(), context.runtime(), context.api()));
+  Extensions::Common::DynamicForwardProxy::DnsCacheManagerFactoryImpl cache_manager_factory(
+      context);
+  auto filter_config =
+      std::make_shared<ProxyFilterConfig>(proto_config, context.scope(), context.drainDecision(),
+                                          context.runtime(), context.api(), cache_manager_factory);
 
   envoy::extensions::filters::network::redis_proxy::v3::RedisProxy::PrefixRoutes prefix_routes(
       proto_config.prefix_routes());
 
-  // Set the catch-all route from the deprecated cluster and settings parameters.
-  if (prefix_routes.hidden_envoy_deprecated_catch_all_cluster().empty() &&
-      prefix_routes.routes_size() == 0 && !prefix_routes.has_catch_all_route()) {
-    if (proto_config.hidden_envoy_deprecated_cluster().empty()) {
-      throw EnvoyException("cannot configure a redis-proxy without any upstream");
-    }
-
-    prefix_routes.mutable_catch_all_route()->set_cluster(
-        proto_config.hidden_envoy_deprecated_cluster());
-  } else if (!prefix_routes.hidden_envoy_deprecated_catch_all_cluster().empty() &&
-             !prefix_routes.has_catch_all_route()) {
-    // Set the catch-all route from the deprecated catch-all cluster.
-    prefix_routes.mutable_catch_all_route()->set_cluster(
-        prefix_routes.hidden_envoy_deprecated_catch_all_cluster());
+  // Set the catch-all route from the settings parameters.
+  if (prefix_routes.routes_size() == 0 && !prefix_routes.has_catch_all_route()) {
+    throw EnvoyException("cannot configure a redis-proxy without any upstream");
   }
 
   absl::flat_hash_set<std::string> unique_clusters;
@@ -74,12 +67,12 @@ Network::FilterFactoryCb RedisProxyFilterConfigFactory::createFilterFactoryFromP
 
   Upstreams upstreams;
   for (auto& cluster : unique_clusters) {
-    Stats::ScopePtr stats_scope =
+    Stats::ScopeSharedPtr stats_scope =
         context.scope().createScope(fmt::format("cluster.{}.redis_cluster", cluster));
     auto conn_pool_ptr = std::make_shared<ConnPool::InstanceImpl>(
         cluster, context.clusterManager(), Common::Redis::Client::ClientFactoryImpl::instance_,
         context.threadLocal(), proto_config.settings(), context.api(), std::move(stats_scope),
-        redis_command_stats, refresh_manager);
+        redis_command_stats, refresh_manager, filter_config->dns_cache_);
     conn_pool_ptr->init();
     upstreams.emplace(cluster, conn_pool_ptr);
   }

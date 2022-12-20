@@ -1,20 +1,18 @@
-#include "server/overload_manager_impl.h"
+#include "source/server/overload_manager_impl.h"
 
 #include <chrono>
 
 #include "envoy/common/exception.h"
 #include "envoy/config/overload/v3/overload.pb.h"
 #include "envoy/config/overload/v3/overload.pb.validate.h"
-#include "envoy/server/overload_manager.h"
 #include "envoy/stats/scope.h"
 
-#include "common/common/fmt.h"
-#include "common/config/utility.h"
-#include "common/event/scaled_range_timer_manager_impl.h"
-#include "common/protobuf/utility.h"
-#include "common/stats/symbol_table_impl.h"
-
-#include "server/resource_monitor_config_impl.h"
+#include "source/common/common/fmt.h"
+#include "source/common/config/utility.h"
+#include "source/common/event/scaled_range_timer_manager_impl.h"
+#include "source/common/protobuf/utility.h"
+#include "source/common/stats/symbol_table.h"
+#include "source/server/resource_monitor_config_impl.h"
 
 #include "absl/container/node_hash_map.h"
 #include "absl/strings/str_cat.h"
@@ -27,14 +25,13 @@ namespace Server {
  */
 class ThreadLocalOverloadStateImpl : public ThreadLocalOverloadState {
 public:
-  ThreadLocalOverloadStateImpl(
-      Event::ScaledRangeTimerManagerPtr scaled_timer_manager,
+  explicit ThreadLocalOverloadStateImpl(
       const NamedOverloadActionSymbolTable& action_symbol_table,
-      const absl::flat_hash_map<OverloadTimerType, Event::ScaledTimerMinimum>& timer_minimums)
-      : action_symbol_table_(action_symbol_table), timer_minimums_(timer_minimums),
-        actions_(action_symbol_table.size(), OverloadActionState(0)),
-        scaled_timer_action_(action_symbol_table.lookup(OverloadActionNames::get().ReduceTimeouts)),
-        scaled_timer_manager_(std::move(scaled_timer_manager)) {}
+      std::shared_ptr<absl::node_hash_map<OverloadProactiveResourceName, ProactiveResource>>&
+          proactive_resources)
+      : action_symbol_table_(action_symbol_table),
+        actions_(action_symbol_table.size(), OverloadActionState(UnitFloat::min())),
+        proactive_resources_(proactive_resources) {}
 
   const OverloadActionState& getState(const std::string& action) override {
     if (const auto symbol = action_symbol_table_.lookup(action); symbol != absl::nullopt) {
@@ -43,32 +40,51 @@ public:
     return always_inactive_;
   }
 
-  Event::TimerPtr createScaledTimer(OverloadTimerType timer_type,
-                                    Event::TimerCb callback) override {
-    auto minimum_it = timer_minimums_.find(timer_type);
-    const Event::ScaledTimerMinimum minimum =
-        minimum_it != timer_minimums_.end() ? minimum_it->second
-                                            : Event::ScaledTimerMinimum(Event::ScaledMinimum(1.0));
-    return scaled_timer_manager_->createTimer(minimum, std::move(callback));
-  }
-
   void setState(NamedOverloadActionSymbolTable::Symbol action, OverloadActionState state) {
     actions_[action.index()] = state;
-    if (scaled_timer_action_.has_value() && scaled_timer_action_.value() == action) {
-      scaled_timer_manager_->setScaleFactor(1 - state.value());
+  }
+
+  bool tryAllocateResource(OverloadProactiveResourceName resource_name,
+                           int64_t increment) override {
+    const auto proactive_resource = proactive_resources_->find(resource_name);
+    if (proactive_resource != proactive_resources_->end()) {
+      return proactive_resource->second.tryAllocateResource(increment);
+    } else {
+      ENVOY_LOG_MISC(warn, " {Failed to allocate unknown proactive resource }");
+      // Resource monitor is not configured.
+      return false;
     }
+  }
+
+  bool tryDeallocateResource(OverloadProactiveResourceName resource_name,
+                             int64_t decrement) override {
+    const auto proactive_resource = proactive_resources_->find(resource_name);
+    if (proactive_resource != proactive_resources_->end()) {
+      if (proactive_resource->second.tryDeallocateResource(decrement)) {
+        return true;
+      } else {
+        return false;
+      }
+    } else {
+      ENVOY_LOG_MISC(warn, " {Failed to deallocate unknown proactive resource }");
+      return false;
+    }
+  }
+
+  bool isResourceMonitorEnabled(OverloadProactiveResourceName resource_name) override {
+    const auto proactive_resource = proactive_resources_->find(resource_name);
+    return proactive_resource != proactive_resources_->end();
   }
 
 private:
   static const OverloadActionState always_inactive_;
   const NamedOverloadActionSymbolTable& action_symbol_table_;
-  const absl::flat_hash_map<OverloadTimerType, Event::ScaledTimerMinimum>& timer_minimums_;
   std::vector<OverloadActionState> actions_;
-  absl::optional<NamedOverloadActionSymbolTable::Symbol> scaled_timer_action_;
-  const Event::ScaledRangeTimerManagerPtr scaled_timer_manager_;
+  std::shared_ptr<absl::node_hash_map<OverloadProactiveResourceName, ProactiveResource>>
+      proactive_resources_;
 };
 
-const OverloadActionState ThreadLocalOverloadStateImpl::always_inactive_{0.0};
+const OverloadActionState ThreadLocalOverloadStateImpl::always_inactive_{UnitFloat::min()};
 
 namespace {
 
@@ -81,6 +97,8 @@ public:
     const OverloadActionState state = actionState();
     state_ =
         value >= threshold_ ? OverloadActionState::saturated() : OverloadActionState::inactive();
+    // This is a floating point comparison, though state_ is always either
+    // saturated or inactive so there's no risk due to floating point precision.
     return state.value() != actionState().value();
   }
 
@@ -109,9 +127,12 @@ public:
     } else if (value >= saturated_threshold_) {
       state_ = OverloadActionState::saturated();
     } else {
-      state_ = OverloadActionState((value - scaling_threshold_) /
-                                   (saturated_threshold_ - scaling_threshold_));
+      state_ = OverloadActionState(
+          UnitFloat((value - scaling_threshold_) / (saturated_threshold_ - scaling_threshold_)));
     }
+    // All values of state_ are produced via this same code path. Even if
+    // old_state and state_ should be approximately equal, there's no harm in
+    // signaling for a small change if they're not float::operator== equal.
     return state_.value() != old_state.value();
   }
 
@@ -123,10 +144,13 @@ private:
   OverloadActionState state_;
 };
 
-Stats::Counter& makeCounter(Stats::Scope& scope, absl::string_view a, absl::string_view b) {
-  Stats::StatNameManagedStorage stat_name(absl::StrCat("overload.", a, ".", b),
-                                          scope.symbolTable());
+Stats::Counter& makeCounter(Stats::Scope& scope, absl::string_view name_of_stat) {
+  Stats::StatNameManagedStorage stat_name(name_of_stat, scope.symbolTable());
   return scope.counterFromStatName(stat_name.statName());
+}
+
+Stats::Counter& makeCounter(Stats::Scope& scope, absl::string_view a, absl::string_view b) {
+  return makeCounter(scope, absl::StrCat("overload.", a, ".", b));
 }
 
 Stats::Gauge& makeGauge(Stats::Scope& scope, absl::string_view a, absl::string_view b,
@@ -136,38 +160,43 @@ Stats::Gauge& makeGauge(Stats::Scope& scope, absl::string_view a, absl::string_v
   return scope.gaugeFromStatName(stat_name.statName(), import_mode);
 }
 
-OverloadTimerType parseTimerType(
+Event::ScaledTimerType parseTimerType(
     envoy::config::overload::v3::ScaleTimersOverloadActionConfig::TimerType config_timer_type) {
   using Config = envoy::config::overload::v3::ScaleTimersOverloadActionConfig;
 
   switch (config_timer_type) {
   case Config::HTTP_DOWNSTREAM_CONNECTION_IDLE:
-    return OverloadTimerType::HttpDownstreamIdleConnectionTimeout;
+    return Event::ScaledTimerType::HttpDownstreamIdleConnectionTimeout;
+  case Config::HTTP_DOWNSTREAM_STREAM_IDLE:
+    return Event::ScaledTimerType::HttpDownstreamIdleStreamTimeout;
+  case Config::TRANSPORT_SOCKET_CONNECT:
+    return Event::ScaledTimerType::TransportSocketConnectTimeout;
   default:
     throw EnvoyException(fmt::format("Unknown timer type {}", config_timer_type));
   }
 }
 
-absl::flat_hash_map<OverloadTimerType, Event::ScaledTimerMinimum>
+Event::ScaledTimerTypeMap
 parseTimerMinimums(const ProtobufWkt::Any& typed_config,
                    ProtobufMessage::ValidationVisitor& validation_visitor) {
   using Config = envoy::config::overload::v3::ScaleTimersOverloadActionConfig;
   const Config action_config =
       MessageUtil::anyConvertAndValidate<Config>(typed_config, validation_visitor);
 
-  absl::flat_hash_map<OverloadTimerType, Event::ScaledTimerMinimum> timer_map;
+  Event::ScaledTimerTypeMap timer_map;
 
   for (const auto& scale_timer : action_config.timer_scale_factors()) {
-    const OverloadTimerType timer_type = parseTimerType(scale_timer.timer());
+    const Event::ScaledTimerType timer_type = parseTimerType(scale_timer.timer());
 
     const Event::ScaledTimerMinimum minimum =
         scale_timer.has_min_timeout()
             ? Event::ScaledTimerMinimum(Event::AbsoluteMinimum(std::chrono::milliseconds(
                   DurationUtil::durationToMilliseconds(scale_timer.min_timeout()))))
             : Event::ScaledTimerMinimum(
-                  Event::ScaledMinimum(scale_timer.min_scale().value() / 100.0));
+                  Event::ScaledMinimum(UnitFloat(scale_timer.min_scale().value() / 100.0)));
 
     auto [_, inserted] = timer_map.insert(std::make_pair(timer_type, minimum));
+    UNREFERENCED_PARAMETER(_);
     if (!inserted) {
       throw EnvoyException(fmt::format("Found duplicate entry for timer type {}",
                                        Config::TimerType_Name(scale_timer.timer())));
@@ -227,8 +256,8 @@ OverloadAction::OverloadAction(const envoy::config::overload::v3::OverloadAction
     case envoy::config::overload::v3::Trigger::TriggerOneofCase::kScaled:
       trigger = std::make_unique<ScaledTriggerImpl>(trigger_config.scaled());
       break;
-    default:
-      NOT_REACHED_GCOVR_EXCL_LINE;
+    case envoy::config::overload::v3::Trigger::TriggerOneofCase::TRIGGER_ONEOF_NOT_SET:
+      throw EnvoyException(absl::StrCat("action not set for trigger ", trigger_config.name()));
     }
 
     if (!triggers_.try_emplace(trigger_config.name(), std::move(trigger)).second) {
@@ -251,7 +280,7 @@ bool OverloadAction::updateResourcePressure(const std::string& name, double pres
   }
   const auto trigger_new_state = it->second->actionState();
   active_gauge_.set(trigger_new_state.isSaturated() ? 1 : 0);
-  scale_percent_gauge_.set(trigger_new_state.value() * 100);
+  scale_percent_gauge_.set(trigger_new_state.value().value() * 100);
 
   {
     // Compute the new state as the maximum over all trigger states.
@@ -274,21 +303,50 @@ OverloadManagerImpl::OverloadManagerImpl(Event::Dispatcher& dispatcher, Stats::S
                                          ThreadLocal::SlotAllocator& slot_allocator,
                                          const envoy::config::overload::v3::OverloadManager& config,
                                          ProtobufMessage::ValidationVisitor& validation_visitor,
-                                         Api::Api& api)
+                                         Api::Api& api, const Server::Options& options)
     : started_(false), dispatcher_(dispatcher), tls_(slot_allocator),
       refresh_interval_(
-          std::chrono::milliseconds(PROTOBUF_GET_MS_OR_DEFAULT(config, refresh_interval, 1000))) {
-  Configuration::ResourceMonitorFactoryContextImpl context(dispatcher, api, validation_visitor);
+          std::chrono::milliseconds(PROTOBUF_GET_MS_OR_DEFAULT(config, refresh_interval, 1000))),
+      proactive_resources_(
+          std::make_unique<
+              absl::node_hash_map<OverloadProactiveResourceName, ProactiveResource>>()) {
+  Configuration::ResourceMonitorFactoryContextImpl context(dispatcher, options, api,
+                                                           validation_visitor);
+  // We should hide impl details from users, for them there should be no distinction between
+  // proactive and regular resource monitors in configuration API. But internally we will maintain
+  // two distinct collections of proactive and regular resources. Proactive resources are not
+  // subject to periodic flushes and can be recalculated/updated on demand by invoking
+  // `tryAllocateResource/tryDeallocateResource` via thread local overload state.
   for (const auto& resource : config.resource_monitors()) {
     const auto& name = resource.name();
-    ENVOY_LOG(debug, "Adding resource monitor for {}", name);
-    auto& factory =
-        Config::Utility::getAndCheckFactory<Configuration::ResourceMonitorFactory>(resource);
-    auto config = Config::Utility::translateToFactoryConfig(resource, validation_visitor, factory);
-    auto monitor = factory.createResourceMonitor(*config, context);
-
-    auto result = resources_.try_emplace(name, name, std::move(monitor), *this, stats_scope);
-    if (!result.second) {
+    // Check if it is a proactive resource.
+    auto proactive_resource_it =
+        OverloadProactiveResources::get().proactive_action_name_to_resource_.find(name);
+    ENVOY_LOG(debug, "Evaluating resource {}", name);
+    bool result = false;
+    if (proactive_resource_it !=
+        OverloadProactiveResources::get().proactive_action_name_to_resource_.end()) {
+      ENVOY_LOG(debug, "Adding proactive resource monitor for {}", name);
+      auto& factory =
+          Config::Utility::getAndCheckFactory<Configuration::ProactiveResourceMonitorFactory>(
+              resource);
+      auto config =
+          Config::Utility::translateToFactoryConfig(resource, validation_visitor, factory);
+      auto monitor = factory.createProactiveResourceMonitor(*config, context);
+      result =
+          proactive_resources_
+              ->try_emplace(proactive_resource_it->second, name, std::move(monitor), stats_scope)
+              .second;
+    } else {
+      ENVOY_LOG(debug, "Adding resource monitor for {}", name);
+      auto& factory =
+          Config::Utility::getAndCheckFactory<Configuration::ResourceMonitorFactory>(resource);
+      auto config =
+          Config::Utility::translateToFactoryConfig(resource, validation_visitor, factory);
+      auto monitor = factory.createResourceMonitor(*config, context);
+      result = resources_.try_emplace(name, name, std::move(monitor), *this, stats_scope).second;
+    }
+    if (!result) {
       throw EnvoyException(absl::StrCat("Duplicate resource monitor ", name));
     }
   }
@@ -308,7 +366,14 @@ OverloadManagerImpl::OverloadManagerImpl(Event::Dispatcher& dispatcher, Stats::S
     }
 
     if (name == OverloadActionNames::get().ReduceTimeouts) {
-      timer_minimums_ = parseTimerMinimums(action.typed_config(), validation_visitor);
+      timer_minimums_ = std::make_shared<const Event::ScaledTimerTypeMap>(
+          parseTimerMinimums(action.typed_config(), validation_visitor));
+    } else if (name == OverloadActionNames::get().ResetStreams) {
+      if (!config.has_buffer_factory_config()) {
+        throw EnvoyException(
+            fmt::format("Overload action \"{}\" requires buffer_factory_config.", name));
+      }
+      makeCounter(api.rootScope(), OverloadActionStatsNames::get().ResetStreamsCount);
     } else if (action.has_typed_config()) {
       throw EnvoyException(fmt::format(
           "Overload action \"{}\" has an unexpected value for the typed_config field", name));
@@ -316,12 +381,15 @@ OverloadManagerImpl::OverloadManagerImpl(Event::Dispatcher& dispatcher, Stats::S
 
     for (const auto& trigger : action.triggers()) {
       const std::string& resource = trigger.name();
+      auto proactive_resource_it =
+          OverloadProactiveResources::get().proactive_action_name_to_resource_.find(resource);
 
-      if (resources_.find(resource) == resources_.end()) {
+      if (resources_.find(resource) == resources_.end() &&
+          proactive_resource_it ==
+              OverloadProactiveResources::get().proactive_action_name_to_resource_.end()) {
         throw EnvoyException(
             fmt::format("Unknown trigger resource {} for overload action {}", resource, name));
       }
-
       resource_to_actions_.insert(std::make_pair(resource, symbol));
     }
   }
@@ -331,9 +399,9 @@ void OverloadManagerImpl::start() {
   ASSERT(!started_);
   started_ = true;
 
-  tls_.set([this](Event::Dispatcher& dispatcher) {
-    return std::make_shared<ThreadLocalOverloadStateImpl>(createScaledRangeTimerManager(dispatcher),
-                                                          action_symbol_table_, timer_minimums_);
+  tls_.set([this](Event::Dispatcher&) {
+    return std::make_shared<ThreadLocalOverloadStateImpl>(action_symbol_table_,
+                                                          proactive_resources_);
   });
 
   if (resources_.empty()) {
@@ -366,6 +434,8 @@ void OverloadManagerImpl::stop() {
 
   // Clear the resource map to block on any pending updates.
   resources_.clear();
+
+  // TODO(nezdolik): wrap proactive monitors into atomic? and clear it here
 }
 
 bool OverloadManagerImpl::registerForAction(const std::string& action,
@@ -385,10 +455,25 @@ bool OverloadManagerImpl::registerForAction(const std::string& action,
 }
 
 ThreadLocalOverloadState& OverloadManagerImpl::getThreadLocalOverloadState() { return *tls_; }
+Event::ScaledRangeTimerManagerFactory OverloadManagerImpl::scaledTimerFactory() {
+  return [this](Event::Dispatcher& dispatcher) {
+    auto manager = createScaledRangeTimerManager(dispatcher, timer_minimums_);
+    registerForAction(OverloadActionNames::get().ReduceTimeouts, dispatcher,
+                      [manager = manager.get()](OverloadActionState scale_state) {
+                        manager->setScaleFactor(
+                            // The action state is 0 for no overload up to 1 for maximal overload,
+                            // but the scale factor for timers is 1 for no scaling and 0 for maximal
+                            // scaling, so invert the value to pass in (1-value).
+                            scale_state.value().invert());
+                      });
+    return manager;
+  };
+}
 
-Event::ScaledRangeTimerManagerPtr
-OverloadManagerImpl::createScaledRangeTimerManager(Event::Dispatcher& dispatcher) const {
-  return std::make_unique<Event::ScaledRangeTimerManagerImpl>(dispatcher);
+Event::ScaledRangeTimerManagerPtr OverloadManagerImpl::createScaledRangeTimerManager(
+    Event::Dispatcher& dispatcher,
+    const Event::ScaledTimerTypeMapConstSharedPtr& timer_minimums) const {
+  return std::make_unique<Event::ScaledRangeTimerManagerImpl>(dispatcher, timer_minimums);
 }
 
 void OverloadManagerImpl::updateResourcePressure(const std::string& resource, double pressure,

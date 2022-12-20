@@ -1,8 +1,7 @@
 #include <string>
 
-#include "common/buffer/buffer_impl.h"
-
-#include "extensions/filters/network/mongo_proxy/bson_impl.h"
+#include "source/common/buffer/buffer_impl.h"
+#include "source/extensions/filters/network/mongo_proxy/bson_impl.h"
 
 #include "test/test_common/printers.h"
 
@@ -49,6 +48,12 @@ TEST(BsonImplTest, InvalodDocumentTermination) {
   BufferHelper::writeInt32(buffer, 5);
   uint8_t invalid_document_end = 0x1;
   buffer.add(&invalid_document_end, sizeof(invalid_document_end));
+  EXPECT_THROW(DocumentImpl::create(buffer), EnvoyException);
+}
+
+TEST(BsonImplTest, DocumentSizeUnderflow) {
+  Buffer::OwnedImpl buffer;
+  BufferHelper::writeInt32(buffer, 2);
   EXPECT_THROW(DocumentImpl::create(buffer), EnvoyException);
 }
 

@@ -3,9 +3,10 @@
 Access logging
 ==============
 
-The :ref:`HTTP connection manager <arch_overview_http_conn_man>` and
-:ref:`tcp proxy <arch_overview_tcp_proxy>` support extensible access logging with the following
-features:
+The :ref:`HTTP connection manager <arch_overview_http_conn_man>`, the
+:ref:`tcp proxy <arch_overview_tcp_proxy>` and the
+:ref:`thrift proxy <config_network_filters_thrift_proxy>`
+support extensible access logging with the following features:
 
 * Any number of access logs per a connection stream.
 * Customizable access log filters that allow different types of requests and responses to be written
@@ -46,6 +47,26 @@ gRPC
 
 * Envoy can send access log messages to a gRPC access logging service.
 
+
+Stdout
+*********
+
+* Asynchronous IO flushing architecture. Access logging will never block the main network processing
+  threads.
+* Customizable access log formats using predefined fields as well as arbitrary HTTP request and
+  response headers.
+* Writes to the standard output of the process. It works in all platforms.
+
+
+Stderr
+********
+
+* Asynchronous IO flushing architecture. Access logging will never block the main network processing
+  threads.
+* Customizable access log formats using predefined fields as well as arbitrary HTTP request and
+  response headers.
+* Writes to the standard error of the process. It works in all platforms.
+
 Further reading
 ---------------
 
@@ -53,3 +74,6 @@ Further reading
 * File :ref:`access log sink <envoy_v3_api_msg_extensions.access_loggers.file.v3.FileAccessLog>`.
 * gRPC :ref:`Access Log Service (ALS) <envoy_v3_api_msg_extensions.access_loggers.grpc.v3.HttpGrpcAccessLogConfig>`
   sink.
+* OpenTelemetry (gRPC) :ref:`LogsService <envoy_v3_api_msg_extensions.access_loggers.open_telemetry.v3.OpenTelemetryAccessLogConfig>`
+* Stdout :ref:`access log sink <envoy_v3_api_msg_extensions.access_loggers.stream.v3.StdoutAccessLog>`
+* Stderr :ref:`access log sink <envoy_v3_api_msg_extensions.access_loggers.stream.v3.StderrAccessLog>`

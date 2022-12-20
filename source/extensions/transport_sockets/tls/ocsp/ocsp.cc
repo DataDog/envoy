@@ -1,9 +1,8 @@
-#include "extensions/transport_sockets/tls/ocsp/ocsp.h"
+#include "source/extensions/transport_sockets/tls/ocsp/ocsp.h"
 
-#include "common/common/utility.h"
-
-#include "extensions/transport_sockets/tls/ocsp/asn1_utility.h"
-#include "extensions/transport_sockets/tls/utility.h"
+#include "source/common/common/utility.h"
+#include "source/extensions/transport_sockets/tls/ocsp/asn1_utility.h"
+#include "source/extensions/transport_sockets/tls/utility.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -266,7 +265,16 @@ ResponseData Asn1OcspUtility::parseResponseData(CBS& cbs) {
     throw EnvoyException("OCSP ResponseData is not a well-formed ASN.1 SEQUENCE");
   }
 
-  unwrap(Asn1Utility::skipOptional(elem, 0));
+  // only support v1, the value of v1 is 0x00
+  auto version_cbs =
+      unwrap(Asn1Utility::getOptional(elem, CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 0));
+  if (version_cbs.has_value()) {
+    auto version = unwrap(Asn1Utility::parseInteger(*version_cbs));
+    if (version != "00") {
+      throw EnvoyException(fmt::format("OCSP ResponseData version 0x{} is not supported", version));
+    }
+  }
+
   skipResponderId(elem);
   unwrap(Asn1Utility::skip(elem, CBS_ASN1_GENERALIZEDTIME));
   auto responses = unwrap(Asn1Utility::parseSequenceOf<SingleResponse>(

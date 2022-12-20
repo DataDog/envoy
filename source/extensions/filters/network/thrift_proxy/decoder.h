@@ -2,12 +2,11 @@
 
 #include "envoy/buffer/buffer.h"
 
-#include "common/common/assert.h"
-#include "common/common/logger.h"
-
-#include "extensions/filters/network/thrift_proxy/filters/filter.h"
-#include "extensions/filters/network/thrift_proxy/protocol.h"
-#include "extensions/filters/network/thrift_proxy/transport.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/logger.h"
+#include "source/extensions/filters/network/thrift_proxy/filters/filter.h"
+#include "source/extensions/filters/network/thrift_proxy/protocol.h"
+#include "source/extensions/filters/network/thrift_proxy/transport.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -17,8 +16,10 @@ namespace ThriftProxy {
 #define ALL_PROTOCOL_STATES(FUNCTION)                                                              \
   FUNCTION(StopIteration)                                                                          \
   FUNCTION(WaitForData)                                                                            \
+  FUNCTION(PassthroughData)                                                                        \
   FUNCTION(MessageBegin)                                                                           \
   FUNCTION(MessageEnd)                                                                             \
+  FUNCTION(ReplyPayload)                                                                           \
   FUNCTION(StructBegin)                                                                            \
   FUNCTION(StructEnd)                                                                              \
   FUNCTION(FieldBegin)                                                                             \
@@ -56,6 +57,8 @@ private:
   }
 };
 
+class DecoderCallbacks;
+
 /**
  * DecoderStateMachine is the Thrift message state machine as described in
  * source/extensions/filters/network/thrift_proxy/docs.
@@ -63,9 +66,9 @@ private:
 class DecoderStateMachine : public Logger::Loggable<Logger::Id::thrift> {
 public:
   DecoderStateMachine(Protocol& proto, MessageMetadataSharedPtr& metadata,
-                      DecoderEventHandler& handler)
-      : proto_(proto), metadata_(metadata), handler_(handler), state_(ProtocolState::MessageBegin) {
-  }
+                      DecoderEventHandler& handler, DecoderCallbacks& callbacks)
+      : proto_(proto), metadata_(metadata), handler_(handler), callbacks_(callbacks),
+        state_(ProtocolState::MessageBegin) {}
 
   /**
    * Consumes as much data from the configured Buffer as possible and executes the decoding state
@@ -85,7 +88,14 @@ public:
   ProtocolState currentState() const { return state_; }
 
   /**
-   * Set the current state. Used for testing only.
+   * Consumes whole passthrough data without the message start portion.
+   * @param buffer a buffer containing whole passthrough data
+   * @throw Envoy Exception if thrown by the underlying Protocol
+   */
+  void runPassthroughData(Buffer::Instance& buffer);
+
+  /**
+   * Set the current state. Used for testing and decoder internal only.
    */
   void setCurrentState(ProtocolState state) { state_ = state; }
 
@@ -129,8 +139,10 @@ private:
 
   // These functions map directly to the matching ProtocolState values. Each returns the next state
   // or ProtocolState::WaitForData if more data is required.
+  DecoderStatus passthroughData(Buffer::Instance& buffer);
   DecoderStatus messageBegin(Buffer::Instance& buffer);
   DecoderStatus messageEnd(Buffer::Instance& buffer);
+  DecoderStatus replyPayload(Buffer::Instance& buffer);
   DecoderStatus structBegin(Buffer::Instance& buffer);
   DecoderStatus structEnd(Buffer::Instance& buffer);
   DecoderStatus fieldBegin(Buffer::Instance& buffer);
@@ -146,6 +158,10 @@ private:
   DecoderStatus setBegin(Buffer::Instance& buffer);
   DecoderStatus setValue(Buffer::Instance& buffer);
   DecoderStatus setEnd(Buffer::Instance& buffer);
+
+  // handleMessageBegin calls the handler for messageBegin and then determines whether to
+  // perform payload passthrough or not
+  DecoderStatus handleMessageBegin();
 
   // handleValue represents the generic Value state from the state machine documentation. It
   // returns either ProtocolState::WaitForData if more data is required or the next state. For
@@ -165,8 +181,11 @@ private:
   Protocol& proto_;
   MessageMetadataSharedPtr metadata_;
   DecoderEventHandler& handler_;
+  DecoderCallbacks& callbacks_;
   ProtocolState state_;
   std::vector<Frame> stack_;
+  uint32_t body_start_{};
+  uint32_t body_bytes_{};
 };
 
 using DecoderStateMachinePtr = std::unique_ptr<DecoderStateMachine>;
@@ -179,6 +198,23 @@ public:
    * @return DecoderEventHandler& a new DecoderEventHandler for a message.
    */
   virtual DecoderEventHandler& newDecoderEventHandler() PURE;
+
+  /**
+   * @return True if payload passthrough is enabled and is supported by filter chain.
+   */
+  virtual bool passthroughEnabled() const PURE;
+
+  /**
+   * @return True if the expected message comes from the client.
+   *
+   * See https://github.com/apache/thrift/blob/master/lib/ts/thrift.d.ts#L68.
+   */
+  virtual bool isRequest() const PURE;
+
+  /**
+   * @return True if payload header keys should be treated as case-sensitive.
+   */
+  virtual bool headerKeysPreserveCase() const PURE;
 };
 
 /**

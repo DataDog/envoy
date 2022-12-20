@@ -1,6 +1,6 @@
 """
 @generated
-cargo-raze workspace build file.
+cargo-raze generated Bazel file.
 
 DO NOT EDIT! Replaced on runs of cargo-raze
 """
@@ -13,19 +13,28 @@ licenses([
 
 # Aliased targets
 alias(
-    name = "log",
-    actual = "@raze__log__0_4_11//:log",
+    name = "protobuf",
+    actual = "@raze__protobuf__2_24_1//:protobuf",
     tags = [
         "cargo-raze",
         "manual",
     ],
 )
 
-alias(
-    name = "proxy_wasm",
-    actual = "@raze__proxy_wasm__0_1_2//:proxy_wasm",
-    tags = [
-        "cargo-raze",
-        "manual",
-    ],
+# Export file for Stardoc support
+exports_files(
+    glob([
+        "**/*.bazel",
+        "**/*.bzl",
+    ]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob([
+        "**/*.bazel",
+        "**/*.bzl",
+    ]),
+    visibility = ["//visibility:public"],
 )

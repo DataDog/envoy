@@ -3,7 +3,7 @@
 #include <chrono>
 #include <memory>
 
-#include "common/grpc/common.h"
+#include "source/common/grpc/common.h"
 
 #include "test/common/upstream/utility.h"
 #include "test/fuzz/utility.h"
@@ -51,7 +51,7 @@ convertToGrpcServingStatus(test::common::upstream::ServingStatus status) {
     return grpc::health::v1::HealthCheckResponse::SERVICE_UNKNOWN;
   }
   default: // shouldn't hit
-    NOT_REACHED_GCOVR_EXCL_LINE;
+    PANIC("reached unexpected code");
   }
 }
 
@@ -84,7 +84,7 @@ makeBufferListToRespondWith(test::common::upstream::GrpcRespondBytes grpc_respon
     return bufferList;
   }
   default: // shouldn't hit
-    NOT_REACHED_GCOVR_EXCL_LINE;
+    PANIC("reached unexpected code");
   }
 }
 
@@ -102,8 +102,12 @@ void HttpHealthCheckFuzz::initialize(test::common::upstream::HealthCheckTestCase
   allocHttpHealthCheckerFromProto(input.health_check_config());
   ON_CALL(runtime_.snapshot_, featureEnabled("health_check.verify_cluster", 100))
       .WillByDefault(testing::Return(input.http_verify_cluster()));
+  auto time_source = std::make_unique<NiceMock<MockTimeSystem>>();
   cluster_->prioritySet().getMockHostSet(0)->hosts_ = {
-      makeTestHost(cluster_->info_, "tcp://127.0.0.1:80")};
+      makeTestHost(cluster_->info_, "tcp://127.0.0.1:80", *time_source)};
+  if (input.upstream_cx_success()) {
+    cluster_->info_->trafficStats().upstream_cx_total_.inc();
+  }
   expectSessionCreate();
   expectStreamCreate(0);
   // This sets up the possibility of testing hosts that never become healthy
@@ -140,19 +144,18 @@ void HttpHealthCheckFuzz::respond(test::common::upstream::Respond respond, bool 
   response_headers->setStatus(status);
 
   // Responding with http can cause client to close, if so create a new one.
-  bool client_will_close = false;
-  if (response_headers->Connection()) {
-    client_will_close =
-        absl::EqualsIgnoreCase(response_headers->Connection()->value().getStringView(),
-                               Http::Headers::get().ConnectionValues.Close);
-  } else if (response_headers->ProxyConnection()) {
-    client_will_close =
-        absl::EqualsIgnoreCase(response_headers->ProxyConnection()->value().getStringView(),
-                               Http::Headers::get().ConnectionValues.Close);
-  }
+  const bool client_will_close =
+      Http::HeaderUtility::shouldCloseConnection(health_checker_->protocol(), *response_headers);
 
-  ENVOY_LOG_MISC(trace, "Responded headers {}", *response_headers.get());
-  test_sessions_[0]->stream_response_callbacks_->decodeHeaders(std::move(response_headers), true);
+  // Check if there is a response body.
+  bool has_response_body = !respond.http_respond().body().empty();
+  test_sessions_[0]->stream_response_callbacks_->decodeHeaders(std::move(response_headers),
+                                                               !has_response_body);
+  if (has_response_body) {
+    Buffer::OwnedImpl response_data(respond.http_respond().body());
+    test_sessions_[0]->stream_response_callbacks_->decodeData(response_data, true);
+    ENVOY_LOG_MISC(trace, "Responded body {}", respond.http_respond().body());
+  }
 
   // Interval timer gets turned on from decodeHeaders()
   if ((!reuse_connection_ || client_will_close) && !last_action) {
@@ -210,8 +213,12 @@ void TcpHealthCheckFuzz::allocTcpHealthCheckerFromProto(
 
 void TcpHealthCheckFuzz::initialize(test::common::upstream::HealthCheckTestCase input) {
   allocTcpHealthCheckerFromProto(input.health_check_config());
+  auto time_source = std::make_unique<NiceMock<MockTimeSystem>>();
   cluster_->prioritySet().getMockHostSet(0)->hosts_ = {
-      makeTestHost(cluster_->info_, "tcp://127.0.0.1:80")};
+      makeTestHost(cluster_->info_, "tcp://127.0.0.1:80", *time_source)};
+  if (input.upstream_cx_success()) {
+    cluster_->info_->trafficStats().upstream_cx_total_.inc();
+  }
   expectSessionCreate();
   expectClientCreate();
   health_checker_->start();
@@ -296,7 +303,7 @@ void TcpHealthCheckFuzz::raiseEvent(const Network::ConnectionEvent& event_type, 
   }
 
   // In the specific case of:
-  // https://github.com/envoyproxy/envoy/blob/master/source/common/upstream/health_checker_impl.cc#L489
+  // https://github.com/envoyproxy/envoy/blob/main/source/common/upstream/health_checker_impl.cc#L489
   // This blows away client, should create a new one
   if (event_type == Network::ConnectionEvent::Connected && empty_response_) {
     ENVOY_LOG_MISC(trace, "Will create client from connected event and empty response.");
@@ -306,7 +313,7 @@ void TcpHealthCheckFuzz::raiseEvent(const Network::ConnectionEvent& event_type, 
 
 void GrpcHealthCheckFuzz::allocGrpcHealthCheckerFromProto(
     const envoy::config::core::v3::HealthCheck& config) {
-  health_checker_ = std::make_shared<TestGrpcHealthCheckerImpl>(
+  health_checker_ = std::make_shared<NiceMock<TestGrpcHealthCheckerImpl>>(
       *cluster_, config, dispatcher_, runtime_, random_,
       HealthCheckEventLoggerPtr(event_logger_storage_.release()));
   ENVOY_LOG_MISC(trace, "Created Test Grpc Health Checker");
@@ -315,8 +322,12 @@ void GrpcHealthCheckFuzz::allocGrpcHealthCheckerFromProto(
 void GrpcHealthCheckFuzz::initialize(test::common::upstream::HealthCheckTestCase input) {
   test_session_ = std::make_unique<TestSession>();
   allocGrpcHealthCheckerFromProto(input.health_check_config());
+  auto time_source = std::make_unique<NiceMock<MockTimeSystem>>();
   cluster_->prioritySet().getMockHostSet(0)->hosts_ = {
-      makeTestHost(cluster_->info_, "tcp://127.0.0.1:80")};
+      makeTestHost(cluster_->info_, "tcp://127.0.0.1:80", *time_source)};
+  if (input.upstream_cx_success()) {
+    cluster_->info_->trafficStats().upstream_cx_total_.inc();
+  }
   expectSessionCreate();
   ON_CALL(dispatcher_, createClientConnection_(_, _, _, _))
       .WillByDefault(testing::InvokeWithoutArgs(
@@ -329,11 +340,11 @@ void GrpcHealthCheckFuzz::initialize(test::common::upstream::HealthCheckTestCase
             std::shared_ptr<Upstream::MockClusterInfo> cluster{
                 new NiceMock<Upstream::MockClusterInfo>()};
             Event::MockDispatcher dispatcher_;
-
+            auto time_source = std::make_unique<NiceMock<MockTimeSystem>>();
             test_session.codec_client_ = new CodecClientForTest(
-                Http::CodecClient::Type::HTTP1, std::move(conn_data.connection_),
-                test_session.codec_, nullptr,
-                Upstream::makeTestHost(cluster, "tcp://127.0.0.1:9000"), dispatcher_);
+                Http::CodecType::HTTP1, std::move(conn_data.connection_), test_session.codec_,
+                nullptr, Upstream::makeTestHost(cluster, "tcp://127.0.0.1:9000", *time_source),
+                dispatcher_);
             return test_session.codec_client_;
           }));
   expectStreamCreate();
@@ -517,7 +528,7 @@ HealthCheckFuzz::getEventTypeFromProto(const test::common::upstream::RaiseEvent&
     return Network::ConnectionEvent::LocalClose;
   }
   default: // shouldn't hit
-    NOT_REACHED_GCOVR_EXCL_LINE;
+    PANIC("reached unexpected code");
   }
 }
 

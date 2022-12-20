@@ -6,8 +6,8 @@
 #include "envoy/stats/scope.h"
 #include "envoy/stats/stats_macros.h"
 
-#include "extensions/common/tap/extension_config_base.h"
-#include "extensions/filters/http/tap/tap_config.h"
+#include "source/extensions/common/tap/extension_config_base.h"
+#include "source/extensions/filters/http/tap/tap_config.h"
 
 #include "absl/strings/string_view.h"
 
@@ -59,8 +59,9 @@ public:
   FilterConfigImpl(const envoy::extensions::filters::http::tap::v3::Tap& proto_config,
                    const std::string& stats_prefix,
                    Extensions::Common::Tap::TapConfigFactoryPtr&& config_factory,
-                   Stats::Scope& scope, Server::Admin& admin, Singleton::Manager& singleton_manager,
-                   ThreadLocal::SlotAllocator& tls, Event::Dispatcher& main_thread_dispatcher);
+                   Stats::Scope& scope, OptRef<Server::Admin> admin,
+                   Singleton::Manager& singleton_manager, ThreadLocal::SlotAllocator& tls,
+                   Event::Dispatcher& main_thread_dispatcher);
 
   // FilterConfig
   HttpTapConfigSharedPtr currentConfig() override;
@@ -93,7 +94,7 @@ public:
   }
 
   // Http::StreamEncoderFilter
-  Http::FilterHeadersStatus encode100ContinueHeaders(Http::ResponseHeaderMap&) override {
+  Http::FilterHeadersStatus encode1xxHeaders(Http::ResponseHeaderMap&) override {
     return Http::FilterHeadersStatus::Continue;
   }
   Http::FilterHeadersStatus encodeHeaders(Http::ResponseHeaderMap& headers,

@@ -10,9 +10,9 @@
 #include "envoy/router/scopes.h"
 #include "envoy/thread_local/thread_local.h"
 
-#include "common/common/hash.h"
-#include "common/protobuf/utility.h"
-#include "common/router/config_impl.h"
+#include "source/common/common/hash.h"
+#include "source/common/protobuf/utility.h"
+#include "source/common/router/config_impl.h"
 
 #include "absl/numeric/int128.h"
 #include "absl/strings/str_format.h"
@@ -81,8 +81,8 @@ private:
 // ScopedRouteConfiguration and corresponding RouteConfigProvider.
 class ScopedRouteInfo {
 public:
-  ScopedRouteInfo(envoy::config::route::v3::ScopedRouteConfiguration&& config_proto,
-                  ConfigConstSharedPtr&& route_config);
+  ScopedRouteInfo(envoy::config::route::v3::ScopedRouteConfiguration config_proto,
+                  ConfigConstSharedPtr route_config);
 
   const ConfigConstSharedPtr& routeConfig() const { return route_config_; }
   const ScopeKey& scopeKey() const { return scope_key_; }
@@ -90,11 +90,13 @@ public:
     return config_proto_;
   }
   const std::string& scopeName() const { return config_proto_.name(); }
+  uint64_t configHash() const { return config_hash_; }
 
 private:
   envoy::config::route::v3::ScopedRouteConfiguration config_proto_;
   ScopeKey scope_key_;
   ConfigConstSharedPtr route_config_;
+  const uint64_t config_hash_;
 };
 using ScopedRouteInfoConstSharedPtr = std::shared_ptr<const ScopedRouteInfo>;
 // Ordered map for consistent config dumping.
@@ -109,8 +111,14 @@ using ScopedRouteMap = std::map<std::string, ScopedRouteInfoConstSharedPtr>;
  */
 class ScopedConfigImpl : public ScopedConfig {
 public:
-  ScopedConfigImpl(ScopedRoutes::ScopeKeyBuilder&& scope_key_builder)
+  explicit ScopedConfigImpl(ScopedRoutes::ScopeKeyBuilder&& scope_key_builder)
       : scope_key_builder_(std::move(scope_key_builder)) {}
+
+  ScopedConfigImpl(ScopedRoutes::ScopeKeyBuilder&& scope_key_builder,
+                   const std::vector<ScopedRouteInfoConstSharedPtr>& scoped_route_infos)
+      : scope_key_builder_(std::move(scope_key_builder)) {
+    addOrUpdateRoutingScopes(scoped_route_infos);
+  }
 
   void
   addOrUpdateRoutingScopes(const std::vector<ScopedRouteInfoConstSharedPtr>& scoped_route_infos);

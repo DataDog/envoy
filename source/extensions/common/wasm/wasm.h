@@ -11,19 +11,18 @@
 #include "envoy/server/lifecycle_notifier.h"
 #include "envoy/stats/scope.h"
 #include "envoy/stats/stats.h"
-#include "envoy/thread_local/thread_local.h"
+#include "envoy/thread_local/thread_local_object.h"
 #include "envoy/upstream/cluster_manager.h"
 
-#include "common/common/assert.h"
-#include "common/common/logger.h"
-#include "common/config/datasource.h"
-#include "common/stats/symbol_table_impl.h"
-#include "common/version/version.h"
-
-#include "extensions/common/wasm/context.h"
-#include "extensions/common/wasm/wasm_extension.h"
-#include "extensions/common/wasm/wasm_vm.h"
-#include "extensions/common/wasm/well_known_names.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/logger.h"
+#include "source/common/config/datasource.h"
+#include "source/common/stats/symbol_table.h"
+#include "source/common/version/version.h"
+#include "source/extensions/common/wasm/context.h"
+#include "source/extensions/common/wasm/plugin.h"
+#include "source/extensions/common/wasm/stats_handler.h"
+#include "source/extensions/common/wasm/wasm_vm.h"
 
 #include "include/proxy-wasm/exports.h"
 #include "include/proxy-wasm/wasm.h"
@@ -33,29 +32,24 @@ namespace Extensions {
 namespace Common {
 namespace Wasm {
 
-#define ALL_WASM_STATS(COUNTER, GAUGE)                                                             \
-  COUNTER(created)                                                                                 \
-  GAUGE(active, NeverImport)
+using CreateContextFn =
+    std::function<ContextBase*(Wasm* wasm, const std::shared_ptr<Plugin>& plugin)>;
 
 class WasmHandle;
-
-struct WasmStats {
-  ALL_WASM_STATS(GENERATE_COUNTER_STRUCT, GENERATE_GAUGE_STRUCT)
-};
 
 // Wasm execution instance. Manages the Envoy side of the Wasm interface.
 class Wasm : public WasmBase, Logger::Loggable<Logger::Id::wasm> {
 public:
-  Wasm(absl::string_view runtime, absl::string_view vm_id, absl::string_view vm_configuration,
-       absl::string_view vm_key, const Stats::ScopeSharedPtr& scope,
-       Upstream::ClusterManager& cluster_manager, Event::Dispatcher& dispatcher);
+  Wasm(WasmConfig& config, absl::string_view vm_key, const Stats::ScopeSharedPtr& scope,
+       Api::Api& api, Upstream::ClusterManager& cluster_manager, Event::Dispatcher& dispatcher);
   Wasm(std::shared_ptr<WasmHandle> other, Event::Dispatcher& dispatcher);
   ~Wasm() override;
 
   Upstream::ClusterManager& clusterManager() const { return cluster_manager_; }
   Event::Dispatcher& dispatcher() { return dispatcher_; }
-  Context* getRootContext(absl::string_view root_id) {
-    return static_cast<Context*>(WasmBase::getRootContext(root_id));
+  Api::Api& api() { return api_; }
+  Context* getRootContext(const std::shared_ptr<PluginBase>& plugin, bool allow_closed) {
+    return static_cast<Context*>(WasmBase::getRootContext(plugin, allow_closed));
   }
   void setTimerPeriod(uint32_t root_context_id, std::chrono::milliseconds period) override;
   virtual void tickHandler(uint32_t root_context_id);
@@ -63,7 +57,7 @@ public:
   Network::DnsResolverSharedPtr& dnsResolver() { return dns_resolver_; }
 
   // WasmBase
-  void error(absl::string_view message) override;
+  void error(std::string_view message) override;
   proxy_wasm::CallOnThreadFunction callOnThreadFunction() override;
   ContextBase* createContext(const std::shared_ptr<PluginBase>& plugin) override;
   ContextBase* createRootContext(const std::shared_ptr<PluginBase>& plugin) override;
@@ -72,12 +66,13 @@ public:
   void getFunctions() override;
 
   // AccessLog::Instance
-  void log(absl::string_view root_id, const Http::RequestHeaderMap* request_headers,
+  void log(const PluginSharedPtr& plugin, const Http::RequestHeaderMap* request_headers,
            const Http::ResponseHeaderMap* response_headers,
            const Http::ResponseTrailerMap* response_trailers,
            const StreamInfo::StreamInfo& stream_info);
 
-  void onStatsUpdate(absl::string_view root_id, Envoy::Stats::MetricSnapshot& snapshot);
+  void onStatsUpdate(const PluginSharedPtr& plugin, Envoy::Stats::MetricSnapshot& snapshot);
+
   virtual std::string buildVersion() { return BUILD_VERSION_NUMBER; }
 
   void initializeLifecycle(Server::ServerLifecycleNotifier& lifecycle_notifier);
@@ -104,16 +99,19 @@ protected:
   proxy_wasm::WasmCallVoid<2> on_stats_update_;
 
   Stats::ScopeSharedPtr scope_;
+  Api::Api& api_;
+  Stats::StatNamePool stat_name_pool_;
+  const Stats::StatName custom_stat_namespace_;
   Upstream::ClusterManager& cluster_manager_;
   Event::Dispatcher& dispatcher_;
   Event::PostCb server_shutdown_post_cb_;
   absl::flat_hash_map<uint32_t, Event::TimerPtr> timer_; // per root_id.
   TimeSource& time_source_;
 
-  // Host Stats/Metrics
-  WasmStats wasm_stats_;
+  // Lifecycle stats
+  LifecycleStatsHandler lifecycle_stats_handler_;
 
-  // Plugin Stats/Metrics
+  // Plugin stats
   absl::flat_hash_map<uint32_t, Stats::Counter*> counters_;
   absl::flat_hash_map<uint32_t, Stats::Gauge*> gauges_;
   absl::flat_hash_map<uint32_t, Stats::Histogram*> histograms_;
@@ -136,29 +134,56 @@ private:
   WasmSharedPtr wasm_;
 };
 
+using WasmHandleSharedPtr = std::shared_ptr<WasmHandle>;
+
+class PluginHandle : public PluginHandleBase {
+public:
+  explicit PluginHandle(const WasmHandleSharedPtr& wasm_handle, const PluginSharedPtr& plugin)
+      : PluginHandleBase(std::static_pointer_cast<WasmHandleBase>(wasm_handle),
+                         std::static_pointer_cast<PluginBase>(plugin)),
+        plugin_(plugin), wasm_handle_(wasm_handle) {}
+
+  WasmHandleSharedPtr& wasmHandle() { return wasm_handle_; }
+  uint32_t rootContextId() { return wasm_handle_->wasm()->getRootContext(plugin_, false)->id(); }
+
+private:
+  PluginSharedPtr plugin_;
+  WasmHandleSharedPtr wasm_handle_;
+};
+
+using PluginHandleSharedPtr = std::shared_ptr<PluginHandle>;
+
+class PluginHandleSharedPtrThreadLocal : public ThreadLocal::ThreadLocalObject {
+public:
+  PluginHandleSharedPtrThreadLocal(PluginHandleSharedPtr handle) : handle_(handle){};
+  PluginHandleSharedPtr& handle() { return handle_; }
+
+private:
+  PluginHandleSharedPtr handle_;
+};
+
 using CreateWasmCallback = std::function<void(WasmHandleSharedPtr)>;
 
 // Returns false if createWasm failed synchronously. This is necessary because xDS *MUST* report
 // all failures synchronously as it has no facility to report configuration update failures
 // asynchronously. Callers should throw an exception if they are part of a synchronous xDS update
 // because that is the mechanism for reporting configuration errors.
-bool createWasm(const VmConfig& vm_config, const PluginSharedPtr& plugin,
-                const Stats::ScopeSharedPtr& scope, Upstream::ClusterManager& cluster_manager,
-                Init::Manager& init_manager, Event::Dispatcher& dispatcher, Api::Api& api,
+bool createWasm(const PluginSharedPtr& plugin, const Stats::ScopeSharedPtr& scope,
+                Upstream::ClusterManager& cluster_manager, Init::Manager& init_manager,
+                Event::Dispatcher& dispatcher, Api::Api& api,
                 Envoy::Server::ServerLifecycleNotifier& lifecycle_notifier,
                 Config::DataSource::RemoteAsyncDataProviderPtr& remote_data_provider,
                 CreateWasmCallback&& callback,
                 CreateContextFn create_root_context_for_testing = nullptr);
 
-WasmHandleSharedPtr
-getOrCreateThreadLocalWasm(const WasmHandleSharedPtr& base_wasm, const PluginSharedPtr& plugin,
-                           Event::Dispatcher& dispatcher,
-                           CreateContextFn create_root_context_for_testing = nullptr);
+PluginHandleSharedPtr
+getOrCreateThreadLocalPlugin(const WasmHandleSharedPtr& base_wasm, const PluginSharedPtr& plugin,
+                             Event::Dispatcher& dispatcher,
+                             CreateContextFn create_root_context_for_testing = nullptr);
 
 void clearCodeCacheForTesting();
-std::string anyToBytes(const ProtobufWkt::Any& any);
 void setTimeOffsetForCodeCacheForTesting(MonotonicTime::duration d);
-EnvoyWasm::WasmEvent toWasmEvent(const std::shared_ptr<WasmHandleBase>& wasm);
+WasmEvent toWasmEvent(const std::shared_ptr<WasmHandleBase>& wasm);
 
 } // namespace Wasm
 } // namespace Common

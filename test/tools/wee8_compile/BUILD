@@ -17,5 +17,10 @@ envoy_cc_binary(
 envoy_cc_library(
     name = "wee8_compile_lib",
     srcs = ["wee8_compile.cc"],
+    copts = [
+        "-Wno-comments",
+        "-Wno-non-virtual-dtor",
+        "-Wno-unused-parameter",
+    ],
     external_deps = ["wee8"],
 )

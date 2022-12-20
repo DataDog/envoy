@@ -1,9 +1,12 @@
-#include "common/config/watch_map.h"
+#include "source/common/config/watch_map.h"
 
 #include "envoy/service/discovery/v3/discovery.pb.h"
 
-#include "common/common/cleanup.h"
-#include "common/config/decoded_resource_impl.h"
+#include "source/common/common/cleanup.h"
+#include "source/common/common/utility.h"
+#include "source/common/config/decoded_resource_impl.h"
+#include "source/common/config/utility.h"
+#include "source/common/config/xds_resource.h"
 
 namespace Envoy {
 namespace Config {
@@ -11,8 +14,9 @@ namespace Config {
 namespace {
 // Returns the namespace part (if there's any) in the resource name.
 std::string namespaceFromName(const std::string& resource_name) {
+  // We simply remove the last / component. E.g. www.foo.com/bar becomes www.foo.com.
   const auto pos = resource_name.find_last_of('/');
-  // we are not interested in the "/" character in the namespace
+  // We are not interested in the "/" character in the namespace
   return pos == std::string::npos ? "" : resource_name.substr(0, pos);
 }
 } // namespace
@@ -43,23 +47,20 @@ void WatchMap::removeDeferredWatches() {
   deferred_removed_during_update_ = nullptr;
 }
 
-AddedRemoved WatchMap::updateWatchInterest(Watch* watch,
-                                           const std::set<std::string>& update_to_these_names) {
-  if (update_to_these_names.empty()) {
+AddedRemoved
+WatchMap::updateWatchInterest(Watch* watch,
+                              const absl::flat_hash_set<std::string>& update_to_these_names) {
+  if (update_to_these_names.empty() || update_to_these_names.contains(Wildcard)) {
     wildcard_watches_.insert(watch);
   } else {
     wildcard_watches_.erase(watch);
   }
 
-  std::vector<std::string> newly_added_to_watch;
-  std::set_difference(update_to_these_names.begin(), update_to_these_names.end(),
-                      watch->resource_names_.begin(), watch->resource_names_.end(),
-                      std::inserter(newly_added_to_watch, newly_added_to_watch.begin()));
+  absl::flat_hash_set<std::string> newly_added_to_watch;
+  SetUtil::setDifference(update_to_these_names, watch->resource_names_, newly_added_to_watch);
 
-  std::vector<std::string> newly_removed_from_watch;
-  std::set_difference(watch->resource_names_.begin(), watch->resource_names_.end(),
-                      update_to_these_names.begin(), update_to_these_names.end(),
-                      std::inserter(newly_removed_from_watch, newly_removed_from_watch.begin()));
+  absl::flat_hash_set<std::string> newly_removed_from_watch;
+  SetUtil::setDifference(watch->resource_names_, update_to_these_names, newly_removed_from_watch);
 
   watch->resource_names_ = update_to_these_names;
 
@@ -72,10 +73,36 @@ absl::flat_hash_set<Watch*> WatchMap::watchesInterestedIn(const std::string& res
   if (!use_namespace_matching_) {
     ret = wildcard_watches_;
   }
-
-  const auto prefix = namespaceFromName(resource_name);
-  const auto resource_key = use_namespace_matching_ && !prefix.empty() ? prefix : resource_name;
-  const auto watches_interested = watch_interest_.find(resource_key);
+  const bool is_xdstp = XdsResourceIdentifier::hasXdsTpScheme(resource_name);
+  xds::core::v3::ResourceName xdstp_resource;
+  XdsResourceIdentifier::EncodeOptions encode_options;
+  encode_options.sort_context_params_ = true;
+  // First look for an exact match. If this is xdstp:// we need to normalize context parameters.
+  if (is_xdstp) {
+    // TODO(htuch): factor this (and stuff in namespaceFromName) into a dedicated library.
+    // This is not very efficient; it is possible to canonicalize etc. much faster with raw string
+    // operations, but this implementation provides a reference for later optimization while we
+    // adopt xdstp://.
+    xdstp_resource = XdsResourceIdentifier::decodeUrn(resource_name);
+  }
+  auto watches_interested = watch_interest_.find(
+      is_xdstp ? XdsResourceIdentifier::encodeUrn(xdstp_resource, encode_options) : resource_name);
+  // If that fails, consider namespace/glob matching. This is the slow path for xdstp:// and should
+  // only happen for glob collections. TODO(htuch): It should be possible to have much more
+  // efficient matchers here.
+  if (watches_interested == watch_interest_.end()) {
+    if (use_namespace_matching_) {
+      watches_interested = watch_interest_.find(namespaceFromName(resource_name));
+    } else if (is_xdstp) {
+      // Replace resource name component with glob for purpose of matching.
+      const auto pos = xdstp_resource.id().find_last_of('/');
+      xdstp_resource.set_id(pos == std::string::npos ? "*"
+                                                     : xdstp_resource.id().substr(0, pos) + "/*");
+      const std::string encoded_name =
+          XdsResourceIdentifier::encodeUrn(xdstp_resource, encode_options);
+      watches_interested = watch_interest_.find(encoded_name);
+    }
+  }
   if (watches_interested != watch_interest_.end()) {
     for (const auto& watch : watches_interested->second) {
       ret.insert(watch);
@@ -84,7 +111,7 @@ absl::flat_hash_set<Watch*> WatchMap::watchesInterestedIn(const std::string& res
   return ret;
 }
 
-void WatchMap::onConfigUpdate(const Protobuf::RepeatedPtrField<ProtobufWkt::Any>& resources,
+void WatchMap::onConfigUpdate(const std::vector<DecodedResourcePtr>& resources,
                               const std::string& version_info) {
   if (watches_.empty()) {
     return;
@@ -97,17 +124,16 @@ void WatchMap::onConfigUpdate(const Protobuf::RepeatedPtrField<ProtobufWkt::Any>
   // Build a map from watches, to the set of updated resources that each watch cares about. Each
   // entry in the map is then a nice little bundle that can be fed directly into the individual
   // onConfigUpdate()s.
-  std::vector<DecodedResourceImplPtr> decoded_resources;
   absl::flat_hash_map<Watch*, std::vector<DecodedResourceRef>> per_watch_updates;
   for (const auto& r : resources) {
-    decoded_resources.emplace_back(
-        DecodedResourceImpl::fromResource((*watches_.begin())->resource_decoder_, r, version_info));
-    const absl::flat_hash_set<Watch*>& interested_in_r =
-        watchesInterestedIn(decoded_resources.back()->name());
+    const absl::flat_hash_set<Watch*>& interested_in_r = watchesInterestedIn(r->name());
     for (const auto& interested_watch : interested_in_r) {
-      per_watch_updates[interested_watch].emplace_back(*decoded_resources.back());
+      per_watch_updates[interested_watch].emplace_back(*r);
     }
   }
+
+  // Execute external config validators.
+  config_validators_.executeValidators(type_url_, resources);
 
   const bool map_is_single_wildcard = (watches_.size() == 1 && wildcard_watches_.size() == 1);
   // We just bundled up the updates into nice per-watch packages. Now, deliver them.
@@ -135,6 +161,21 @@ void WatchMap::onConfigUpdate(const Protobuf::RepeatedPtrField<ProtobufWkt::Any>
   }
 }
 
+void WatchMap::onConfigUpdate(const Protobuf::RepeatedPtrField<ProtobufWkt::Any>& resources,
+                              const std::string& version_info) {
+  if (watches_.empty()) {
+    return;
+  }
+
+  std::vector<DecodedResourcePtr> decoded_resources;
+  for (const auto& r : resources) {
+    decoded_resources.emplace_back(
+        DecodedResourceImpl::fromResource((*watches_.begin())->resource_decoder_, r, version_info));
+  }
+
+  onConfigUpdate(decoded_resources, version_info);
+}
+
 void WatchMap::onConfigUpdate(
     const Protobuf::RepeatedPtrField<envoy::service::discovery::v3::Resource>& added_resources,
     const Protobuf::RepeatedPtrField<std::string>& removed_resources,
@@ -146,7 +187,7 @@ void WatchMap::onConfigUpdate(
   // Build a pair of maps: from watches, to the set of resources {added,removed} that each watch
   // cares about. Each entry in the map-pair is then a nice little bundle that can be fed directly
   // into the individual onConfigUpdate()s.
-  std::vector<DecodedResourceImplPtr> decoded_resources;
+  std::vector<DecodedResourcePtr> decoded_resources;
   absl::flat_hash_map<Watch*, std::vector<DecodedResourceRef>> per_watch_added;
   for (const auto& r : added_resources) {
     const absl::flat_hash_set<Watch*>& interested_in_r = watchesInterestedIn(r.name());
@@ -168,6 +209,9 @@ void WatchMap::onConfigUpdate(
       *per_watch_removed[interested_watch].Add() = r;
     }
   }
+
+  // Execute external config validators.
+  config_validators_.executeValidators(type_url_, decoded_resources, removed_resources);
 
   // We just bundled up the updates into nice per-watch packages. Now, deliver them.
   for (const auto& [cur_watch, resource_to_add] : per_watch_added) {
@@ -206,9 +250,10 @@ void WatchMap::onConfigUpdateFailed(ConfigUpdateFailureReason reason, const Envo
   }
 }
 
-std::set<std::string> WatchMap::findAdditions(const std::vector<std::string>& newly_added_to_watch,
-                                              Watch* watch) {
-  std::set<std::string> newly_added_to_subscription;
+absl::flat_hash_set<std::string>
+WatchMap::findAdditions(const absl::flat_hash_set<std::string>& newly_added_to_watch,
+                        Watch* watch) {
+  absl::flat_hash_set<std::string> newly_added_to_subscription;
   for (const auto& name : newly_added_to_watch) {
     auto entry = watch_interest_.find(name);
     if (entry == watch_interest_.end()) {
@@ -222,9 +267,10 @@ std::set<std::string> WatchMap::findAdditions(const std::vector<std::string>& ne
   return newly_added_to_subscription;
 }
 
-std::set<std::string>
-WatchMap::findRemovals(const std::vector<std::string>& newly_removed_from_watch, Watch* watch) {
-  std::set<std::string> newly_removed_from_subscription;
+absl::flat_hash_set<std::string>
+WatchMap::findRemovals(const absl::flat_hash_set<std::string>& newly_removed_from_watch,
+                       Watch* watch) {
+  absl::flat_hash_set<std::string> newly_removed_from_subscription;
   for (const auto& name : newly_removed_from_watch) {
     auto entry = watch_interest_.find(name);
     RELEASE_ASSERT(

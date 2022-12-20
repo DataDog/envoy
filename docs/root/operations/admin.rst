@@ -24,7 +24,6 @@ modify different aspects of the server:
   .. code-block:: yaml
 
     admin:
-      access_log_path: /tmp/admin_access.log
       profile_path: /tmp/envoy.prof
       address:
         socket_address: { address: 127.0.0.1, port_value: 9901 }
@@ -64,7 +63,9 @@ modify different aspects of the server:
 
 .. http:get:: /
 
-  Render an HTML home page with a table of links to all available options.
+  Render an HTML home page with a table of links to all available options. This can be
+  disabled by compiling Envoy with ``--define=admin_html=disabled`` in which case an error
+  message is printed. Disabling the HTML mode reduces the Envoy binary size.
 
 .. http:get:: /help
 
@@ -98,7 +99,7 @@ modify different aspects of the server:
       :ref:`average success rate <envoy_v3_api_field_data.cluster.v3.OutlierEjectSuccessRate.cluster_average_success_rate>`,
       and :ref:`ejection threshold<envoy_v3_api_field_data.cluster.v3.OutlierEjectSuccessRate.cluster_success_rate_ejection_threshold>`
       are presented. Both of these values could be ``-1`` if there was not enough data to calculate them in the last
-      :ref/`interval<envoy_v3_api_field_config.cluster.v3.OutlierDetection.interval>`.
+      :ref:`interval<envoy_v3_api_field_config.cluster.v3.OutlierDetection.interval>`.
 
     - ``added_via_api`` flag -- ``false`` if the cluster was added via static configuration, ``true``
       if it was added via the :ref:`CDS<config_cluster_manager_cds>` api.
@@ -195,6 +196,25 @@ modify different aspects of the server:
   field, use the mask query parameter documented above. If you want only a subset of fields from the repeated
   resource, use both as documented below.
 
+.. _operations_admin_interface_config_dump_by_name_regex:
+
+.. http:get:: /config_dump?name_regex={}
+
+  Dump only the currently loaded configurations whose names match the specified regex. Can be used with
+  both ``resource`` and ``mask`` query parameters.
+
+  For example, ``/config_dump?name_regex=.*substring.*`` would return all resource types
+  whose name field matches the given regex.
+
+  Per resource, the matched name field is:
+
+  - :ref:`envoy.config.listener.v3.Listener.name <envoy_v3_api_field_config.listener.v3.Listener.name>`
+  - :ref:`envoy.config.route.v3.RouteConfiguration.name <envoy_v3_api_field_config.route.v3.RouteConfiguration.name>`
+  - :ref:`envoy.config.route.v3.ScopedRouteConfiguration.name <envoy_v3_api_field_config.route.v3.ScopedRouteConfiguration.name>`
+  - :ref:`envoy.config.cluster.v3.Cluster.name <envoy_v3_api_field_config.cluster.v3.Cluster.name>`
+  - :ref:`envoy.extensions.transport_sockets.tls.v3.Secret <envoy_v3_api_field_extensions.transport_sockets.tls.v3.Secret.name>`
+  - :ref:`envoy.config.endpoint.v3.ClusterLoadAssignment <envoy_v3_api_field_config.endpoint.v3.ClusterLoadAssignment.cluster_name>`
+
 .. _operations_admin_interface_config_dump_by_resource_and_mask:
 
 .. http:get:: /config_dump?resource={}&mask={}
@@ -218,6 +238,13 @@ modify different aspects of the server:
 .. http:post:: /heapprofiler
 
   Enable or disable the Heap profiler. Requires compiling with gperftools. The output file can be configured by admin.profile_path.
+
+.. _operations_admin_interface_heap_dump:
+
+.. http:get:: /heap_dump
+
+  Dump current heap profile of Envoy process. The output content is parsable binary by the ``pprof`` tool.
+  Requires compiling with tcmalloc (default).
 
 .. _operations_admin_interface_healthcheck_fail:
 
@@ -243,7 +270,7 @@ modify different aspects of the server:
 
 .. http:get:: /init_dump
 
-  Dump currently information of unready targets of various Envoy components as JSON-serialized proto
+  Dump current information of unready targets of various Envoy components as JSON-serialized proto
   messages. See the :ref:`response definition <envoy_v3_api_msg_admin.v3.UnreadyTargetsDumps>` for more
   information.
 
@@ -274,21 +301,22 @@ modify different aspects of the server:
 
 .. http:post:: /logging
 
-  Enable/disable different logging levels on a particular logger or all loggers.
+  Enable/disable logging levels for different loggers.
 
   - To change the logging level across all loggers, set the query parameter as level=<desired_level>.
   - To change a particular logger's level, set the query parameter like so, <logger_name>=<desired_level>.
+  - To change multiple logging levels at once, set the query parameter as paths=<logger_name1>=<desired_level1>,<logger_name2>=<desired_level2>.
   - To list the loggers, send a POST request to the /logging endpoint without a query parameter.
 
   .. note::
 
-    Generally only used during development. With `--enable-fine-grain-logging` being set, the logger is represented
-    by the path of the file it belongs to (to be specific, the path determined by `__FILE__`), so the logger list
+    Generally only used during development. With ``--enable-fine-grain-logging`` being set, the logger is represented
+    by the path of the file it belongs to (to be specific, the path determined by ``__FILE__``), so the logger list
     will show a list of file paths, and the specific path should be used as <logger_name> to change the log level.
 
 .. http:get:: /memory
 
-  Prints current memory allocation / heap usage, in bytes. Useful in lieu of printing all `/stats` and filtering to get the memory-related statistics.
+  Prints current memory allocation / heap usage, in bytes. Useful in lieu of printing all ``/stats`` and filtering to get the memory-related statistics.
 
 .. http:post:: /quitquitquit
 
@@ -308,7 +336,7 @@ modify different aspects of the server:
 
    .. http:post:: /drain_listeners?inboundonly
 
-   :ref:`Drains <arch_overview_draining>` all inbound listeners. `traffic_direction` field in
+   :ref:`Drains <arch_overview_draining>` all inbound listeners. ``traffic_direction`` field in
    :ref:`Listener <envoy_v3_api_msg_config.listener.v3.Listener>` is used to determine whether a listener
    is inbound or outbound.
 
@@ -323,6 +351,8 @@ modify different aspects of the server:
    This operation directly stops the matched listeners on workers. Once listeners in a given
    traffic direction are stopped, listener additions and modifications in that direction
    are not allowed.
+
+.. _operations_admin_interface_server_info:
 
 .. http:get:: /server_info
 
@@ -394,7 +424,7 @@ modify different aspects of the server:
 
     LIVE
 
-  See the `state` field of the :ref:`ServerInfo proto <envoy_v3_api_msg_admin.v3.ServerInfo>` for an
+  See the ``state`` field of the :ref:`ServerInfo proto <envoy_v3_api_msg_admin.v3.ServerInfo>` for an
   explanation of the output.
 
 .. _operations_admin_interface_stats:
@@ -403,11 +433,13 @@ modify different aspects of the server:
 
   Outputs all statistics on demand. This command is very useful for local debugging.
   Histograms will output the computed quantiles i.e P0,P25,P50,P75,P90,P99,P99.9 and P100.
-  The output for each quantile will be in the form of (interval,cumulative) where interval value
-  represents the summary since last flush interval and cumulative value represents the
-  summary since the start of Envoy instance. "No recorded values" in the histogram output indicates
-  that it has not been updated with a value.
-  See :ref:`here <operations_stats>` for more information.
+  The output for each quantile will be in the form of (interval,cumulative) where the interval value
+  represents the summary since last flush. By default, a timer is setup to flush in intervals
+  defined by :ref:`stats_flush_interval <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.stats_flush_interval>`,
+  defaulting to 5 seconds. If :ref:`stats_flush_on_admin <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.stats_flush_on_admin>`
+  is specified, stats are flushed when this endpoint is queried and a timer will not be used. The cumulative
+  value represents the summary since the start of Envoy instance. "No recorded values" in the histogram
+  output indicates that it has not been updated with a value. See :ref:`here <operations_stats>` for more information.
 
   .. http:get:: /stats?usedonly
 
@@ -416,11 +448,30 @@ modify different aspects of the server:
 
   .. http:get:: /stats?filter=regex
 
-  Filters the returned stats to those with names matching the regular expression
-  `regex`. Compatible with `usedonly`. Performs partial matching by default, so
-  `/stats?filter=server` will return all stats containing the word `server`.
-  Full-string matching can be specified with begin- and end-line anchors. (i.e.
-  `/stats?filter=^server.concurrency$`)
+  Filters the returned stats to those with names matching the regular
+  expression ``regex``. Compatible with ``usedonly``. Performs partial
+  matching by default, so ``/stats?filter=server`` will return all stats
+  containing the word ``server``.  Full-string matching can be specified
+  with begin- and end-line anchors. (i.e.  ``/stats?filter=^server.concurrency$``)
+
+  By default, the regular expression is evaluated using the
+  `Google RE2 <https://github.com/google/re2>`_ engine. To switch
+  to std::regex using Ecmascript syntax, POST an admin :ref:`runtime <arch_overview_runtime>` request:
+  ``/runtime_modify?envoy.reloadable_features.admin_stats_filter_use_re2=false``
+
+  .. http:get:: /stats?histogram_buckets=cumulative
+
+  Changes histogram output to display cumulative buckets with upper bounds (e.g. B0.5, B1, B5, ...).
+  The output for each bucket will be in the form of (interval,cumulative) (e.g. B0.5(0,0)).
+  All values below the upper bound are included even if they are placed into other buckets.
+  Compatible with ``usedonly`` and ``filter``.
+
+  .. http:get:: /stats?histogram_buckets=disjoint
+
+  Changes histogram output to display disjoint buckets with upper bounds (e.g. B0.5, B1, B5, ...).
+  The output for each bucket will be in the form of (interval,cumulative) (e.g. B0.5(0,0)).
+  Buckets do not include values from other buckets with smaller upper bounds;
+  the previous bucket's upper bound acts as a lower bound. Compatible with ``usedonly`` and ``filter``.
 
 .. http:get:: /stats?format=json
 
@@ -478,6 +529,102 @@ modify different aspects of the server:
   Outputs statistics that Envoy has updated (counters incremented at least once,
   gauges changed at least once, and histograms added to at least once) in JSON format.
 
+  .. http:get:: /stats?format=json&histogram_buckets=cumulative
+
+  Changes histogram output to display cumulative buckets with upper bounds.
+  All values below the upper bound are included even if they are placed into other buckets.
+  Compatible with ``usedonly`` and ``filter``.
+
+  Example histogram output:
+
+  .. code-block:: json
+
+    {
+      "histograms": [
+        {
+          "name": "example_histogram",
+          "buckets": [
+            {"upper_bound": 1, "interval": 0, "cumulative": 0},
+            {"upper_bound": 2, "interval": 0, "cumulative": 1},
+            {"upper_bound": 3, "interval": 1, "cumulative": 3},
+            {"upper_bound": 4, "interval": 1, "cumulative": 3}
+          ]
+        },
+        {
+          "name": "other_example_histogram",
+          "buckets": [
+            {"upper_bound": 0.5, "interval": 0, "cumulative": 0},
+            {"upper_bound": 1, "interval": 0, "cumulative": 0},
+            {"upper_bound": 5, "interval": 0, "cumulative": 0},
+            {"upper_bound": 10, "interval": 0, "cumulative": 0},
+            {"upper_bound": 25, "interval": 0, "cumulative": 0},
+            {"upper_bound": 50, "interval": 0, "cumulative": 0},
+            {"upper_bound": 100, "interval": 0, "cumulative": 0},
+            {"upper_bound": 250, "interval": 0, "cumulative": 0},
+            {"upper_bound": 500, "interval": 0, "cumulative": 0},
+            {"upper_bound": 1000, "interval": 0, "cumulative": 0},
+            {"upper_bound": 2500, "interval": 0, "cumulative": 100},
+            {"upper_bound": 5000, "interval": 0, "cumulative": 300},
+            {"upper_bound": 10000, "interval": 0, "cumulative": 600},
+            {"upper_bound": 30000, "interval": 0, "cumulative": 600},
+            {"upper_bound": 60000, "interval": 0, "cumulative": 600},
+            {"upper_bound": 300000, "interval": 0, "cumulative": 600},
+            {"upper_bound": 600000, "interval": 0, "cumulative": 600},
+            {"upper_bound": 1800000, "interval": 0, "cumulative": 600},
+            {"upper_bound": 3600000, "interval": 0, "cumulative": 600}
+          ]
+        }
+      ]
+    }
+
+  .. http:get:: /stats?format=json&histogram_buckets=disjoint
+
+  Changes histogram output to display disjoint buckets with upper bounds.
+  Buckets do not include values from other buckets with smaller upper bounds;
+  the previous bucket's upper bound acts as a lower bound. Compatible with ``usedonly`` and ``filter``.
+
+  Example histogram output:
+
+  .. code-block:: json
+
+    {
+      "histograms": [
+        {
+          "name": "example_histogram",
+          "buckets": [
+            {"upper_bound": 1, "interval": 0, "cumulative": 0},
+            {"upper_bound": 2, "interval": 0, "cumulative": 1},
+            {"upper_bound": 3, "interval": 1, "cumulative": 2},
+            {"upper_bound": 4, "interval": 0, "cumulative": 0}
+          ]
+        },
+        {
+          "name": "other_example_histogram",
+          "buckets": [
+            {"upper_bound": 0.5, "interval": 0, "cumulative": 0},
+            {"upper_bound": 1, "interval": 0, "cumulative": 0},
+            {"upper_bound": 5, "interval": 0, "cumulative": 0},
+            {"upper_bound": 10, "interval": 0, "cumulative": 0},
+            {"upper_bound": 25, "interval": 0, "cumulative": 0},
+            {"upper_bound": 50, "interval": 0, "cumulative": 0},
+            {"upper_bound": 100, "interval": 0, "cumulative": 0},
+            {"upper_bound": 250, "interval": 0, "cumulative": 0},
+            {"upper_bound": 500, "interval": 0, "cumulative": 0},
+            {"upper_bound": 1000, "interval": 0, "cumulative": 0},
+            {"upper_bound": 2500, "interval": 0, "cumulative": 100},
+            {"upper_bound": 5000, "interval": 0, "cumulative": 200},
+            {"upper_bound": 10000, "interval": 0, "cumulative": 0},
+            {"upper_bound": 30000, "interval": 0, "cumulative": 0},
+            {"upper_bound": 60000, "interval": 0, "cumulative": 0},
+            {"upper_bound": 300000, "interval": 0, "cumulative": 0},
+            {"upper_bound": 600000, "interval": 0, "cumulative": 0},
+            {"upper_bound": 1800000, "interval": 0, "cumulative": 0},
+            {"upper_bound": 3600000, "interval": 0, "cumulative": 0}
+          ]
+        }
+      ]
+    }
+
 .. http:get:: /stats?format=prometheus
 
   or alternatively,
@@ -487,17 +634,31 @@ modify different aspects of the server:
   Outputs /stats in `Prometheus <https://prometheus.io/docs/instrumenting/exposition_formats/>`_
   v0.0.4 format. This can be used to integrate with a Prometheus server.
 
-  You can optionally pass the `usedonly` URL query argument to only get statistics that
-  Envoy has updated (counters incremented at least once, gauges changed at least once,
-  and histograms added to at least once)
+  .. http:get:: /stats?format=prometheus&usedonly
 
-  .. http:get:: /stats/recentlookups
+  You can optionally pass the ``usedonly`` URL query parameter to only get statistics that
+  Envoy has updated (counters incremented at least once, gauges changed at least once,
+  and histograms added to at least once).
+
+  .. http:get:: /stats?format=prometheus&text_readouts
+
+  Optional ``text_readouts`` query parameter is used to get all stats including text readouts.
+  Text readout stats are returned in gauge format. These gauges always have value 0. Each
+  gauge record has additional label named ``text_value`` that contains value of a text readout.
+
+  .. warning::
+    Every unique combination of key-value label pair represents a new time series
+    in Prometheus, which can dramatically increase the amount of data stored.
+    Text readout stats create a new label value every time the value
+    of the text readout stat changes, which could create an unbounded number of time series.
+
+.. http:get:: /stats/recentlookups
 
   This endpoint helps Envoy developers debug potential contention
   issues in the stats system. Initially, only the count of StatName
   lookups is acumulated, not the specific names that are being looked
   up. In order to see specific recent requests, you must enable the
-  feature by POSTing to `/stats/recentlookups/enable`. There may be
+  feature by POSTing to ``/stats/recentlookups/enable``. There may be
   approximately 40-100 nanoseconds of added overhead per lookup.
 
   When enabled, this endpoint emits a table of stat names that were
@@ -509,9 +670,6 @@ modify different aspects of the server:
   but in response to user requests on high core-count machines, this
   can cause performance issues due to mutex contention.
 
-  This admin endpoint requires Envoy to be started with option
-  `--use-fake-symbol-table 0`.
-
   See :repo:`source/docs/stats.md` for more details.
 
   Note also that actual mutex contention can be tracked via :http:get:`/contention`.
@@ -519,15 +677,15 @@ modify different aspects of the server:
   .. http:post:: /stats/recentlookups/enable
 
   Turns on collection of recent lookup of stat-names, thus enabling
-  `/stats/recentlookups`.
+  ``/stats/recentlookups``.
 
   See :repo:`source/docs/stats.md` for more details.
 
   .. http:post:: /stats/recentlookups/disable
 
   Turns off collection of recent lookup of stat-names, thus disabling
-  `/stats/recentlookups`. It also clears the list of lookups. However,
-  the total count, visible as stat `server.stats_recent_lookups`, is
+  ``/stats/recentlookups``. It also clears the list of lookups. However,
+  the total count, visible as stat ``server.stats_recent_lookups``, is
   not cleared, and continues to accumulate.
 
   See :repo:`source/docs/stats.md` for more details.

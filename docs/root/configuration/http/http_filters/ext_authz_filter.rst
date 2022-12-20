@@ -3,8 +3,8 @@
 External Authorization
 ======================
 * External authorization :ref:`architecture overview <arch_overview_ext_authz>`
+* This filter should be configured with the type URL ``type.googleapis.com/envoy.extensions.filters.http.ext_authz.v3.ExtAuthz``.
 * :ref:`HTTP filter v3 API reference <envoy_v3_api_msg_extensions.filters.http.ext_authz.v3.ExtAuthz>`
-* This filter should be configured with the name *envoy.filters.http.ext_authz*.
 
 The external authorization filter calls an external gRPC or HTTP service to check whether an incoming
 HTTP request is authorized or not.
@@ -45,7 +45,11 @@ A sample filter configuration for a gRPC authorization server:
   clusters:
     - name: ext-authz
       type: static
-      http2_protocol_options: {}
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
       load_assignment:
         cluster_name: ext-authz
         endpoints:
@@ -129,7 +133,7 @@ Per-Route Configuration
 -----------------------
 
 A sample virtual host and route filter configuration.
-In this example we add additional context on the virtual host, and disabled the filter for `/static` prefixed routes.
+In this example we add additional context on the virtual host, and disabled the filter for ``/static`` prefixed routes.
 
 .. code-block:: yaml
 
@@ -165,8 +169,7 @@ The HTTP filter outputs statistics in the *cluster.<route target cluster>.ext_au
   :widths: 1, 1, 2
 
   ok, Counter, Total responses from the filter.
-  error, Counter, Total errors (including timeouts) contacting the external service.
-  timeout, Counter, Total timeouts contacting the external service (only counted when timeout is measured when check request is created).
+  error, Counter, Total errors contacting the external service.
   denied, Counter, Total responses from the authorizations service that were to deny the traffic.
   disabled, Counter, Total requests that are allowed without calling external services due to the filter is disabled.
   failure_mode_allowed, Counter, "Total requests that were error(s) but were allowed through because
@@ -176,18 +179,26 @@ Dynamic Metadata
 ----------------
 .. _config_http_filters_ext_authz_dynamic_metadata:
 
-.. note::
+The External Authorization filter supports emitting dynamic metadata as an opaque ``google.protobuf.Struct``.
 
-  The External Authorization filter emits dynamic metadata only when it is configured to use
-  gRPC service as the authorization server.
-
-The External Authorization filter emits dynamic metadata as an opaque ``google.protobuf.Struct``
-*only* when the gRPC authorization server returns a :ref:`CheckResponse
-<envoy_v3_api_msg_service.auth.v3.CheckResponse>` with a filled :ref:`dynamic_metadata
+When using a gRPC authorization server, dynamic metadata will be emitted only when the :ref:`CheckResponse
+<envoy_v3_api_msg_service.auth.v3.CheckResponse>` contains a filled :ref:`dynamic_metadata
 <envoy_v3_api_field_service.auth.v3.CheckResponse.dynamic_metadata>` field.
+
+When using an HTTP authorization server, dynamic metadata will be emitted only when there are response headers
+from the authorization server that match the configured
+:ref:`dynamic_metadata_from_headers <envoy_v3_api_field_extensions.filters.http.ext_authz.v3.AuthorizationResponse.dynamic_metadata_from_headers>`,
+if set. For every response header that matches, the filter will emit dynamic metadata whose key is the name of the matched header and whose value is the value of the matched header.
+
+Both the HTTP and gRPC external authorization filters support a dynamic metadata field called ``ext_authz_duration`` which records the time it takes to complete an authorization request in milliseconds.
+This field will not be populated if the request does not complete.
 
 Runtime
 -------
 The fraction of requests for which the filter is enabled can be configured via the :ref:`runtime_key
 <envoy_v3_api_field_config.core.v3.RuntimeFractionalPercent.runtime_key>` value of the :ref:`filter_enabled
 <envoy_v3_api_field_extensions.filters.http.ext_authz.v3.ExtAuthz.filter_enabled>` field.
+
+Tracing
+-------
+The ext_authz span keeps the sampling status of the parent span, i.e. in the tracing backend we will either see both the parent span and the child ext_authz span, or none of them.

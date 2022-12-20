@@ -16,9 +16,29 @@ namespace {
 enum class SubscriptionType {
   Grpc,
   DeltaGrpc,
+  UnifiedGrpc,
+  UnifiedDeltaGrpc,
   Http,
   Filesystem,
 };
+
+// NOLINTNEXTLINE(readability-identifier-naming)
+void PrintTo(const SubscriptionType sub, std::ostream* os) {
+  (*os) << ([sub]() -> absl::string_view {
+    switch (sub) {
+    case SubscriptionType::Grpc:
+      return "Grpc";
+    case SubscriptionType::DeltaGrpc:
+      return "DeltaGrpc";
+    case SubscriptionType::Http:
+      return "Http";
+    case SubscriptionType::Filesystem:
+      return "Filesystem";
+    default:
+      return "unknown";
+    }
+  })();
+}
 
 class SubscriptionImplTest : public testing::TestWithParam<SubscriptionType> {
 public:
@@ -30,10 +50,20 @@ public:
   void initialize(std::chrono::milliseconds init_fetch_timeout = std::chrono::milliseconds(0)) {
     switch (GetParam()) {
     case SubscriptionType::Grpc:
-      test_harness_ = std::make_unique<GrpcSubscriptionTestHarness>(init_fetch_timeout);
+      test_harness_ = std::make_unique<GrpcSubscriptionTestHarness>(LegacyOrUnified::Legacy,
+                                                                    init_fetch_timeout);
       break;
     case SubscriptionType::DeltaGrpc:
-      test_harness_ = std::make_unique<GrpcSubscriptionTestHarness>(init_fetch_timeout);
+      test_harness_ = std::make_unique<GrpcSubscriptionTestHarness>(LegacyOrUnified::Legacy,
+                                                                    init_fetch_timeout);
+      break;
+    case SubscriptionType::UnifiedGrpc:
+      test_harness_ = std::make_unique<GrpcSubscriptionTestHarness>(LegacyOrUnified::Unified,
+                                                                    init_fetch_timeout);
+      break;
+    case SubscriptionType::UnifiedDeltaGrpc:
+      test_harness_ = std::make_unique<GrpcSubscriptionTestHarness>(LegacyOrUnified::Unified,
+                                                                    init_fetch_timeout);
       break;
     case SubscriptionType::Http:
       test_harness_ = std::make_unique<HttpSubscriptionTestHarness>(init_fetch_timeout);
@@ -161,9 +191,9 @@ TEST_P(SubscriptionImplInitFetchTimeoutTest, InitialFetchTimeout) {
   expectEnableInitFetchTimeoutTimer(std::chrono::milliseconds(1000));
   startSubscription({"cluster0", "cluster1"});
   EXPECT_TRUE(statsAre(1, 0, 0, 0, 0, 0, 0, ""));
-  if (GetParam() == SubscriptionType::Http) {
-    expectDisableInitFetchTimeoutTimer();
-  }
+
+  expectDisableInitFetchTimeoutTimer();
+
   expectConfigUpdateFailed();
 
   callInitFetchTimeoutCb();

@@ -9,9 +9,9 @@
 #include "envoy/server/transport_socket_config.h"
 #include "envoy/ssl/context_config.h"
 
-#include "common/common/empty_string.h"
-#include "common/json/json_loader.h"
-#include "common/ssl/tls_certificate_config_impl.h"
+#include "source/common/common/empty_string.h"
+#include "source/common/json/json_loader.h"
+#include "source/common/ssl/tls_certificate_config_impl.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -22,8 +22,6 @@ static const std::string INLINE_STRING = "<inline>";
 
 class ContextConfigImpl : public virtual Ssl::ContextConfig {
 public:
-  ~ContextConfigImpl() override;
-
   // Ssl::ContextConfig
   const std::string& alpnProtocols() const override { return alpn_protocols_; }
   const std::string& cipherSuites() const override { return cipher_suites_; }
@@ -43,6 +41,12 @@ public:
   }
   unsigned minProtocolVersion() const override { return min_protocol_version_; };
   unsigned maxProtocolVersion() const override { return max_protocol_version_; };
+  const Network::Address::IpList& tlsKeyLogLocal() const override { return tls_keylog_local_; };
+  const Network::Address::IpList& tlsKeyLogRemote() const override { return tls_keylog_remote_; };
+  const std::string& tlsKeyLogPath() const override { return tls_keylog_path_; };
+  AccessLog::AccessLogManager& accessLogManager() const override {
+    return factory_context_.accessLogManager();
+  }
 
   bool isReady() const override {
     const bool tls_is_ready =
@@ -57,6 +61,7 @@ public:
   void setSecretUpdateCallback(std::function<void()> callback) override;
   Ssl::HandshakerFactoryCb createHandshaker() const override;
   Ssl::HandshakerCapabilities capabilities() const override { return capabilities_; }
+  Ssl::SslCtxCb sslctxCb() const override { return sslctx_cb_; }
 
   Ssl::CertificateValidationContextConfigPtr getCombinedValidationContextConfig(
       const envoy::extensions::transport_sockets::tls::v3::CertificateValidationContext&
@@ -69,6 +74,8 @@ protected:
                     const std::string& default_cipher_suites, const std::string& default_curves,
                     Server::Configuration::TransportSocketFactoryContext& factory_context);
   Api::Api& api_;
+  const Server::Options& options_;
+  Singleton::Manager& singleton_manager_;
 
 private:
   static unsigned tlsVersionFromProto(
@@ -88,17 +95,22 @@ private:
       default_cvc_;
   std::vector<Secret::TlsCertificateConfigProviderSharedPtr> tls_certificate_providers_;
   // Handle for TLS certificate dynamic secret callback.
-  Envoy::Common::CallbackHandle* tc_update_callback_handle_{};
+  std::vector<Envoy::Common::CallbackHandlePtr> tc_update_callback_handles_;
   Secret::CertificateValidationContextConfigProviderSharedPtr
       certificate_validation_context_provider_;
   // Handle for certificate validation context dynamic secret callback.
-  Envoy::Common::CallbackHandle* cvc_update_callback_handle_{};
-  Envoy::Common::CallbackHandle* cvc_validation_callback_handle_{};
+  Envoy::Common::CallbackHandlePtr cvc_update_callback_handle_;
+  Envoy::Common::CallbackHandlePtr cvc_validation_callback_handle_;
   const unsigned min_protocol_version_;
   const unsigned max_protocol_version_;
 
   Ssl::HandshakerFactoryCb handshaker_factory_cb_;
   Ssl::HandshakerCapabilities capabilities_;
+  Ssl::SslCtxCb sslctx_cb_;
+  Server::Configuration::TransportSocketFactoryContext& factory_context_;
+  const std::string tls_keylog_path_;
+  const Network::Address::IpList tls_keylog_local_;
+  const Network::Address::IpList tls_keylog_remote_;
 };
 
 class ClientContextConfigImpl : public ContextConfigImpl, public Envoy::Ssl::ClientContextConfig {
@@ -136,7 +148,6 @@ public:
   ServerContextConfigImpl(
       const envoy::extensions::transport_sockets::tls::v3::DownstreamTlsContext& config,
       Server::Configuration::TransportSocketFactoryContext& secret_provider_context);
-  ~ServerContextConfigImpl() override;
 
   // Ssl::ServerContextConfig
   bool requireClientCertificate() const override { return require_client_certificate_; }
@@ -168,8 +179,8 @@ private:
   const OcspStaplePolicy ocsp_staple_policy_;
   std::vector<SessionTicketKey> session_ticket_keys_;
   const Secret::TlsSessionTicketKeysConfigProviderSharedPtr session_ticket_keys_provider_;
-  Envoy::Common::CallbackHandle* stk_update_callback_handle_{};
-  Envoy::Common::CallbackHandle* stk_validation_callback_handle_{};
+  Envoy::Common::CallbackHandlePtr stk_update_callback_handle_;
+  Envoy::Common::CallbackHandlePtr stk_validation_callback_handle_;
 
   std::vector<ServerContextConfig::SessionTicketKey> getSessionTicketKeys(
       const envoy::extensions::transport_sockets::tls::v3::TlsSessionTicketKeys& keys);

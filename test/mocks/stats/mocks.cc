@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#include "common/stats/symbol_table_impl.h"
+#include "source/common/stats/symbol_table.h"
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -70,8 +70,12 @@ MockMetricSnapshot::~MockMetricSnapshot() = default;
 MockSink::MockSink() = default;
 MockSink::~MockSink() = default;
 
-MockStore::MockStore() : TestUtil::TestStore(*global_symbol_table_) {
+MockSinkPredicates::MockSinkPredicates() = default;
+MockSinkPredicates::~MockSinkPredicates() = default;
+
+MockStore::MockStore() {
   ON_CALL(*this, counter(_)).WillByDefault(ReturnRef(counter_));
+  ON_CALL(*this, gauge(_, _)).WillByDefault(ReturnRef(gauge_));
   ON_CALL(*this, histogram(_, _))
       .WillByDefault(Invoke([this](const std::string& name, Histogram::Unit unit) -> Histogram& {
         auto* histogram = new NiceMock<MockHistogram>(); // symbol_table_);
@@ -89,7 +93,7 @@ MockStore::MockStore() : TestUtil::TestStore(*global_symbol_table_) {
 }
 MockStore::~MockStore() = default;
 
-MockIsolatedStatsStore::MockIsolatedStatsStore() : TestUtil::TestStore(*global_symbol_table_) {}
+MockIsolatedStatsStore::MockIsolatedStatsStore() = default;
 MockIsolatedStatsStore::~MockIsolatedStatsStore() = default;
 
 MockStatsMatcher::MockStatsMatcher() = default;

@@ -7,16 +7,15 @@
 #include "envoy/thread_local/thread_local.h"
 #include "envoy/upstream/cluster_manager.h"
 
-#include "common/buffer/buffer_impl.h"
-#include "common/common/hash.h"
-#include "common/network/filter_impl.h"
-#include "common/protobuf/utility.h"
-#include "common/singleton/const_singleton.h"
-#include "common/upstream/load_balancer_impl.h"
-#include "common/upstream/upstream_impl.h"
-
-#include "extensions/filters/network/common/redis/client.h"
-#include "extensions/filters/network/common/redis/utility.h"
+#include "source/common/buffer/buffer_impl.h"
+#include "source/common/common/hash.h"
+#include "source/common/network/filter_impl.h"
+#include "source/common/protobuf/utility.h"
+#include "source/common/singleton/const_singleton.h"
+#include "source/common/upstream/load_balancer_impl.h"
+#include "source/common/upstream/upstream_impl.h"
+#include "source/extensions/filters/network/common/redis/client.h"
+#include "source/extensions/filters/network/common/redis/utility.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -73,11 +72,12 @@ public:
                           EncoderPtr&& encoder, DecoderFactory& decoder_factory,
                           const Config& config,
                           const RedisCommandStatsSharedPtr& redis_command_stats,
-                          Stats::Scope& scope);
+                          Stats::Scope& scope, bool is_transaction_client);
 
   ClientImpl(Upstream::HostConstSharedPtr host, Event::Dispatcher& dispatcher, EncoderPtr&& encoder,
              DecoderFactory& decoder_factory, const Config& config,
-             const RedisCommandStatsSharedPtr& redis_command_stats, Stats::Scope& scope);
+             const RedisCommandStatsSharedPtr& redis_command_stats, Stats::Scope& scope,
+             bool is_transaction_client);
   ~ClientImpl() override;
 
   // Client
@@ -145,6 +145,7 @@ private:
   Envoy::TimeSource& time_source_;
   const RedisCommandStatsSharedPtr redis_command_stats_;
   Stats::Scope& scope_;
+  bool is_transaction_client_;
 };
 
 class ClientFactoryImpl : public ClientFactory {
@@ -153,7 +154,7 @@ public:
   ClientPtr create(Upstream::HostConstSharedPtr host, Event::Dispatcher& dispatcher,
                    const Config& config, const RedisCommandStatsSharedPtr& redis_command_stats,
                    Stats::Scope& scope, const std::string& auth_username,
-                   const std::string& auth_password) override;
+                   const std::string& auth_password, bool is_transaction_client) override;
 
   static ClientFactoryImpl instance_;
 

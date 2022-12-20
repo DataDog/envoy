@@ -4,7 +4,6 @@ load(
     "envoy_cc_benchmark_binary",
     "envoy_cc_fuzz_test",
     "envoy_cc_test",
-    "envoy_cc_test_binary",
     "envoy_cc_test_library",
     "envoy_package",
 )
@@ -20,6 +19,14 @@ envoy_cc_test(
         "//source/common/stats:allocator_lib",
         "//test/test_common:logging_lib",
         "//test/test_common:thread_factory_for_test_lib",
+    ],
+)
+
+envoy_cc_test(
+    name = "custom_stat_namespaces_impl_test",
+    srcs = ["custom_stat_namespaces_impl_test.cc"],
+    deps = [
+        "//source/common/stats:custom_stat_namespaces_lib",
     ],
 )
 
@@ -61,8 +68,8 @@ envoy_cc_test(
     ],
 )
 
-envoy_cc_test_binary(
-    name = "recent_lookups_speed_test",
+envoy_cc_benchmark_binary(
+    name = "recent_lookups_benchmark",
     srcs = ["recent_lookups_speed_test.cc"],
     external_deps = [
         "benchmark",
@@ -73,6 +80,11 @@ envoy_cc_test_binary(
         "//source/common/runtime:runtime_lib",
         "//source/common/stats:recent_lookups_lib",
     ],
+)
+
+envoy_benchmark_test(
+    name = "recent_lookups_benchmark_test",
+    benchmark_binary = "recent_lookups_benchmark",
 )
 
 envoy_cc_test(
@@ -95,10 +107,11 @@ envoy_cc_test_library(
         "abseil_strings",
     ],
     deps = [
-        "//include/envoy/stats:stats_interface",
+        "//envoy/stats:stats_interface",
         "//source/common/common:assert_lib",
         "//source/common/memory:stats_lib",
         "//source/common/stats:isolated_store_lib",
+        "//test/test_common:global_lib",
     ],
 )
 
@@ -126,7 +139,7 @@ envoy_cc_test(
 envoy_cc_test(
     name = "refcount_ptr_test",
     srcs = ["refcount_ptr_test.cc"],
-    deps = ["//include/envoy/stats:refcount_ptr_interface"],
+    deps = ["//envoy/stats:refcount_ptr_interface"],
 )
 
 envoy_cc_test(
@@ -177,8 +190,8 @@ envoy_cc_fuzz_test(
     ],
 )
 
-envoy_cc_test_binary(
-    name = "symbol_table_speed_test",
+envoy_cc_benchmark_binary(
+    name = "symbol_table_benchmark",
     srcs = [
         "make_elements_helper.cc",
         "make_elements_helper.h",
@@ -190,6 +203,7 @@ envoy_cc_test_binary(
     ],
     deps = [
         ":stat_test_utility_lib",
+        "//source/common/common:hash_lib",
         "//source/common/memory:stats_lib",
         "//source/common/stats:isolated_store_lib",
         "//source/common/stats:symbol_table_lib",
@@ -198,6 +212,11 @@ envoy_cc_test_binary(
         "//test/test_common:logging_lib",
         "//test/test_common:utility_lib",
     ],
+)
+
+envoy_benchmark_test(
+    name = "symbol_table_benchmark_test",
+    benchmark_binary = "symbol_table_benchmark",
 )
 
 envoy_cc_test(
@@ -221,6 +240,25 @@ envoy_cc_test(
     ],
 )
 
+envoy_cc_benchmark_binary(
+    name = "tag_extractor_impl_benchmark",
+    srcs = [
+        "tag_extractor_impl_speed_test.cc",
+    ],
+    external_deps = [
+        "benchmark",
+    ],
+    deps = [
+        "//source/common/stats:tag_producer_lib",
+        "@envoy_api//envoy/config/metrics/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_benchmark_test(
+    name = "tag_extractor_impl_benchmark_test",
+    benchmark_binary = "tag_extractor_impl_benchmark",
+)
+
 envoy_cc_test(
     name = "thread_local_store_test",
     srcs = ["thread_local_store_test.cc"],
@@ -236,6 +274,7 @@ envoy_cc_test(
         "//test/mocks/stats:stats_mocks",
         "//test/mocks/thread_local:thread_local_mocks",
         "//test/test_common:logging_lib",
+        "//test/test_common:real_threads_test_helper_lib",
         "//test/test_common:test_time_lib",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/config/metrics/v3:pkg_cc_proto",
@@ -253,6 +292,7 @@ envoy_cc_benchmark_binary(
         ":stat_test_utility_lib",
         "//source/common/common:thread_lib",
         "//source/common/event:dispatcher_lib",
+        "//source/common/stats:stats_matcher_lib",
         "//source/common/stats:thread_local_store_lib",
         "//source/common/thread_local:thread_local_lib",
         "//test/test_common:simulated_time_system_lib",

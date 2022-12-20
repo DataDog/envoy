@@ -1,16 +1,17 @@
-#include "extensions/filters/http/grpc_stats/grpc_stats_filter.h"
+#include "source/extensions/filters/http/grpc_stats/grpc_stats_filter.h"
 
 #include "envoy/extensions/filters/http/grpc_stats/v3/config.pb.h"
 #include "envoy/extensions/filters/http/grpc_stats/v3/config.pb.validate.h"
+#include "envoy/grpc/context.h"
 #include "envoy/registry/registry.h"
 
-#include "common/grpc/codec.h"
-#include "common/grpc/common.h"
-#include "common/grpc/context_impl.h"
-#include "common/runtime/runtime_impl.h"
-#include "common/stats/symbol_table_impl.h"
-
-#include "extensions/filters/http/common/pass_through_filter.h"
+#include "source/common/grpc/codec.h"
+#include "source/common/grpc/common.h"
+#include "source/common/grpc/context_impl.h"
+#include "source/common/runtime/runtime_impl.h"
+#include "source/common/stats/symbol_table.h"
+#include "source/common/stream_info/utility.h"
+#include "source/extensions/filters/http/common/pass_through_filter.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -24,7 +25,6 @@ namespace {
 // The expected usage pattern is that the map is populated once, and can then be queried lock-free
 // as long as it isn't being modified.
 class GrpcServiceMethodToRequestNamesMap {
-public:
 public:
   // Construct a map populated with the services/methods in method_list.
   GrpcServiceMethodToRequestNamesMap(Stats::SymbolTable& symbol_table,
@@ -53,7 +53,7 @@ private:
     static uint64_t hash(const ViewTuple& key) { return absl::Hash<ViewTuple>()(key); }
 
   public:
-    using is_transparent = void;
+    using is_transparent = void; // NOLINT(readability-identifier-naming)
 
     uint64_t operator()(const OwningKey& key) const { return hash(key); }
     uint64_t operator()(const ViewKey& key) const {
@@ -62,7 +62,7 @@ private:
   };
 
   struct MapEq {
-    using is_transparent = void;
+    using is_transparent = void; // NOLINT(readability-identifier-naming)
     bool operator()(const OwningKey& left, const OwningKey& right) const { return left == right; }
     bool operator()(const OwningKey& left, const ViewKey& right) const {
       return left == std::make_tuple(right.service_, right.method_);
@@ -93,7 +93,8 @@ struct Config {
   Config(const envoy::extensions::filters::http::grpc_stats::v3::FilterConfig& proto_config,
          Server::Configuration::FactoryContext& context)
       : context_(context.grpcContext()), emit_filter_state_(proto_config.emit_filter_state()),
-        enable_upstream_stats_(proto_config.enable_upstream_stats()) {
+        enable_upstream_stats_(proto_config.enable_upstream_stats()),
+        replace_dots_in_grpc_service_name_(proto_config.replace_dots_in_grpc_service_name()) {
 
     switch (proto_config.per_method_stat_specifier_case()) {
     case envoy::extensions::filters::http::grpc_stats::v3::FilterConfig::
@@ -106,7 +107,7 @@ struct Config {
         // set.
         //
         // This will flip to false after one release.
-        const bool runtime_feature_default = true;
+        const bool runtime_feature_default = false;
 
         const char* runtime_key = "envoy.deprecated_features.grpc_stats_filter_enable_"
                                   "stats_for_all_methods_by_default";
@@ -137,6 +138,7 @@ struct Config {
   Grpc::Context& context_;
   const bool emit_filter_state_;
   const bool enable_upstream_stats_;
+  const bool replace_dots_in_grpc_service_name_;
   bool stats_for_all_methods_{false};
   absl::optional<GrpcServiceMethodToRequestNamesMap> allowlist_;
 };
@@ -153,7 +155,12 @@ public:
       if (cluster_) {
         if (config_->stats_for_all_methods_) {
           // Get dynamically-allocated Context::RequestStatNames from the context.
-          request_names_ = config_->context_.resolveDynamicServiceAndMethod(headers.Path());
+          if (config_->replace_dots_in_grpc_service_name_) {
+            request_names_ =
+                config_->context_.resolveDynamicServiceAndMethodWithDotReplaced(headers.Path());
+          } else {
+            request_names_ = config_->context_.resolveDynamicServiceAndMethod(headers.Path());
+          }
           do_stat_tracking_ = request_names_.has_value();
         } else {
           // This case handles both proto_config.stats_for_all_methods() == false,
@@ -246,7 +253,7 @@ public:
       auto state = std::make_unique<GrpcStatsObject>();
       filter_object_ = state.get();
       decoder_callbacks_->streamInfo().filterState()->setData(
-          HttpFilterNames::get().GrpcStats, std::move(state),
+          "envoy.filters.http.grpc_stats", std::move(state),
           StreamInfo::FilterState::StateType::Mutable,
           StreamInfo::FilterState::LifeSpan::FilterChain);
     }
@@ -255,13 +262,16 @@ public:
   }
 
   void maybeChargeUpstreamStat() {
-    if (config_->enable_upstream_stats_ &&
-        decoder_callbacks_->streamInfo().lastUpstreamTxByteSent().has_value() &&
-        decoder_callbacks_->streamInfo().lastUpstreamRxByteReceived().has_value()) {
+    if (!config_->enable_upstream_stats_) {
+      return;
+    }
+    StreamInfo::TimingUtility timing(decoder_callbacks_->streamInfo());
+    if (config_->enable_upstream_stats_ && timing.lastUpstreamTxByteSent().has_value() &&
+        timing.lastUpstreamRxByteReceived().has_value()) {
       std::chrono::milliseconds chrono_duration =
           std::chrono::duration_cast<std::chrono::milliseconds>(
-              decoder_callbacks_->streamInfo().lastUpstreamRxByteReceived().value() -
-              decoder_callbacks_->streamInfo().lastUpstreamTxByteSent().value());
+              timing.lastUpstreamRxByteReceived().value() -
+              timing.lastUpstreamTxByteSent().value());
       config_->context_.chargeUpstreamStat(*cluster_, request_names_, chrono_duration);
     }
   }
@@ -276,7 +286,7 @@ private:
   Grpc::FrameInspector response_counter_;
   Upstream::ClusterInfoConstSharedPtr cluster_;
   absl::optional<Grpc::Context::RequestStatNames> request_names_;
-}; // namespace
+};
 
 } // namespace
 

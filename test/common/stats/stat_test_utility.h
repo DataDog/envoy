@@ -2,9 +2,11 @@
 
 #include "envoy/stats/store.h"
 
-#include "common/common/logger.h"
-#include "common/memory/stats.h"
-#include "common/stats/isolated_store_impl.h"
+#include "source/common/common/logger.h"
+#include "source/common/memory/stats.h"
+#include "source/common/stats/isolated_store_impl.h"
+
+#include "test/test_common/global.h"
 
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
@@ -12,6 +14,29 @@
 namespace Envoy {
 namespace Stats {
 namespace TestUtil {
+
+class TestSymbolTableHelper {
+public:
+  SymbolTable& symbolTable() { return symbol_table_; }
+  const SymbolTable& constSymbolTable() const { return symbol_table_; }
+
+private:
+  SymbolTableImpl symbol_table_;
+};
+
+// Symbol table wrapper that instantiates a shared, reference-counted, global
+// symbol table. This is needed by the mocking infrastructure, as Envoy mocks
+// are constructed without any context, but StatNames that are symbolized from
+// one mock may need to be entered into stat storage in another one. Thus they
+// must be connected by global state.
+class TestSymbolTable {
+public:
+  SymbolTable& operator*() { return global_.get().symbolTable(); }
+  const SymbolTable& operator*() const { return global_.get().constSymbolTable(); }
+  SymbolTable* operator->() { return &global_.get().symbolTable(); }
+  const SymbolTable* operator->() const { return &global_.get().constSymbolTable(); }
+  Envoy::Test::Global<TestSymbolTableHelper> global_;
+};
 
 /**
  * Calls fn for a sampling of plausible stat names given a number of clusters.
@@ -24,7 +49,8 @@ namespace TestUtil {
  * @param num_clusters the number of clusters for which to generate stats.
  * @param fn the function to call with every stat name.
  */
-void forEachSampleStat(int num_clusters, std::function<void(absl::string_view)> fn);
+void forEachSampleStat(int num_clusters, bool include_other_stats,
+                       std::function<void(absl::string_view)> fn);
 
 // Tracks memory consumption over a span of time. Test classes instantiate a
 // MemoryTest object to start measuring heap memory, and call consumedBytes() to
@@ -74,6 +100,11 @@ private:
   const size_t memory_at_construction_;
 };
 
+class SymbolTableProvider {
+public:
+  TestSymbolTable global_symbol_table_;
+};
+
 // Helper class to use in lieu of an actual Stats::Store for doing lookups by
 // name. The intent is to remove the deprecated Scope::counter(const
 // std::string&) methods, and always use this class for accessing stats by
@@ -87,9 +118,9 @@ private:
 // use the StatName as a key, we must use strings in tests to avoid forcing
 // the tests to construct the StatName using the same pattern of dynamic
 // and symbol strings as production.
-class TestStore : public IsolatedStoreImpl {
+class TestStore : public SymbolTableProvider, public IsolatedStoreImpl {
 public:
-  TestStore() = default;
+  TestStore() : IsolatedStoreImpl(*global_symbol_table_) {}
 
   // Constructs a store using a symbol table, allowing for explicit sharing.
   explicit TestStore(SymbolTable& symbol_table) : IsolatedStoreImpl(symbol_table) {}
@@ -124,10 +155,25 @@ public:
   GaugeOptConstRef findGaugeByString(const std::string& name) const;
   HistogramOptConstRef findHistogramByString(const std::string& name) const;
 
+  void deliverHistogramToSinks(const Histogram& histogram, uint64_t value) override {
+    histogram_values_map_[histogram.name()].push_back(value);
+  }
+
+  std::vector<uint64_t> histogramValues(const std::string& name, bool clear) {
+    auto it = histogram_values_map_.find(name);
+    ASSERT(it != histogram_values_map_.end(), absl::StrCat("Couldn't find histogram ", name));
+    std::vector<uint64_t> copy = it->second;
+    if (clear) {
+      it->second.clear();
+    }
+    return copy;
+  }
+
 private:
   absl::flat_hash_map<std::string, Counter*> counter_map_;
   absl::flat_hash_map<std::string, Gauge*> gauge_map_;
   absl::flat_hash_map<std::string, Histogram*> histogram_map_;
+  absl::flat_hash_map<std::string, std::vector<uint64_t>> histogram_values_map_;
 };
 
 // Compares the memory consumed against an exact expected value, but only on
@@ -155,7 +201,9 @@ private:
   do {                                                                                             \
     if (Stats::TestUtil::MemoryTest::mode() != Stats::TestUtil::MemoryTest::Mode::Disabled) {      \
       EXPECT_LE(consumed_bytes, upper_bound);                                                      \
-      EXPECT_GT(consumed_bytes, 0);                                                                \
+      if (upper_bound != 0) {                                                                      \
+        EXPECT_GT(consumed_bytes, 0);                                                              \
+      }                                                                                            \
     } else {                                                                                       \
       ENVOY_LOG_MISC(                                                                              \
           info, "Skipping upper-bound memory test against {} bytes as platform lacks tcmalloc",    \

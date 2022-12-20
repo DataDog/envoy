@@ -3,11 +3,9 @@
 #include "envoy/http/header_map.h"
 #include "envoy/stream_info/stream_info.h"
 
-#include "common/crypto/utility.h"
-
-#include "extensions/common/crypto/crypto_impl.h"
-#include "extensions/filters/common/lua/lua.h"
-#include "extensions/filters/common/lua/wrappers.h"
+#include "source/common/crypto/utility.h"
+#include "source/extensions/filters/common/lua/lua.h"
+#include "source/extensions/filters/common/lua/wrappers.h"
 
 #include "openssl/evp.h"
 
@@ -48,8 +46,11 @@ public:
   static ExportedFunctions exportedFunctions() {
     return {{"add", static_luaAdd},
             {"get", static_luaGet},
+            {"getAtIndex", static_luaGetAtIndex},
+            {"getNumValues", static_luaGetNumValues},
             {"remove", static_luaRemove},
             {"replace", static_luaReplace},
+            {"setHttp1ReasonPhrase", static_luaSetHttp1ReasonPhrase},
             {"__pairs", static_luaPairs}};
   }
 
@@ -68,6 +69,21 @@ private:
    * @return string value if found or nil.
    */
   DECLARE_LUA_FUNCTION(HeaderMapWrapper, luaGet);
+
+  /**
+   * Get a header value from the map.
+   * @param 1 (string): header name.
+   * @param 2 (int): index of the value for the given header which needs to be retrieved.
+   * @return string value if found or nil.
+   */
+  DECLARE_LUA_FUNCTION(HeaderMapWrapper, luaGetAtIndex);
+
+  /**
+   * Get the header value size from the map.
+   * @param 1 (string): header name.
+   * @return int value size if found or 0.
+   */
+  DECLARE_LUA_FUNCTION(HeaderMapWrapper, luaGetNumValues);
 
   /**
    * Implementation of the __pairs metamethod so a headers wrapper can be iterated over using
@@ -89,6 +105,13 @@ private:
    * @return nothing.
    */
   DECLARE_LUA_FUNCTION(HeaderMapWrapper, luaReplace);
+
+  /**
+   * Set a HTTP1 reason phrase
+   * @param 1 (string): reason phrase
+   * @return nothing.
+   */
+  DECLARE_LUA_FUNCTION(HeaderMapWrapper, luaSetHttp1ReasonPhrase);
 
   void checkModifiable(lua_State* state);
 
@@ -186,7 +209,8 @@ public:
             {"dynamicMetadata", static_luaDynamicMetadata},
             {"downstreamLocalAddress", static_luaDownstreamLocalAddress},
             {"downstreamDirectRemoteAddress", static_luaDownstreamDirectRemoteAddress},
-            {"downstreamSslConnection", static_luaDownstreamSslConnection}};
+            {"downstreamSslConnection", static_luaDownstreamSslConnection},
+            {"requestedServerName", static_luaRequestedServerName}};
   }
 
 private:
@@ -221,8 +245,17 @@ private:
    */
   DECLARE_LUA_FUNCTION(StreamInfoWrapper, luaDownstreamDirectRemoteAddress);
 
+  /**
+   * Get requested server name
+   * @return requested server name (e.g. SNI in TLS), if any.
+   */
+  DECLARE_LUA_FUNCTION(StreamInfoWrapper, luaRequestedServerName);
+
   // Envoy::Lua::BaseLuaObject
-  void onMarkDead() override { dynamic_metadata_wrapper_.reset(); }
+  void onMarkDead() override {
+    dynamic_metadata_wrapper_.reset();
+    downstream_ssl_connection_.reset();
+  }
 
   StreamInfo::StreamInfo& stream_info_;
   Filters::Common::Lua::LuaDeathRef<DynamicMetadataMapWrapper> dynamic_metadata_wrapper_;
@@ -248,6 +281,11 @@ private:
   DECLARE_LUA_FUNCTION(PublicKeyWrapper, luaGet);
 
   const std::string public_key_;
+};
+
+class Timestamp {
+public:
+  enum Resolution { Millisecond, Microsecond, Undefined };
 };
 
 } // namespace Lua

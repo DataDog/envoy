@@ -1,19 +1,18 @@
-#include "extensions/transport_sockets/proxy_protocol/config.h"
+#include "source/extensions/transport_sockets/proxy_protocol/config.h"
 
 #include "envoy/extensions/transport_sockets/proxy_protocol/v3/upstream_proxy_protocol.pb.h"
 #include "envoy/extensions/transport_sockets/proxy_protocol/v3/upstream_proxy_protocol.pb.validate.h"
 #include "envoy/registry/registry.h"
 
-#include "common/config/utility.h"
-
-#include "extensions/transport_sockets/proxy_protocol/proxy_protocol.h"
+#include "source/common/config/utility.h"
+#include "source/extensions/transport_sockets/proxy_protocol/proxy_protocol.h"
 
 namespace Envoy {
 namespace Extensions {
 namespace TransportSockets {
 namespace ProxyProtocol {
 
-Network::TransportSocketFactoryPtr
+Network::UpstreamTransportSocketFactoryPtr
 UpstreamProxyProtocolSocketConfigFactory::createTransportSocketFactory(
     const Protobuf::Message& message,
     Server::Configuration::TransportSocketFactoryContext& context) {

@@ -19,7 +19,7 @@ At a minimum, you will need to start Envoy configured with the following section
 - :ref:`dynamic_resources <start_quick_start_dynamic_dynamic_resources>` to tell Envoy which configurations should be updated dynamically
 - :ref:`static_resources <start_quick_start_dynamic_static_resources>` to specify where Envoy should retrieve its configuration from.
 
-You can also add an :ref:`admin <start_quick_start_dynamic_admin>` section if you wish to monitor Envoy or
+You can also add an :ref:`admin <start_quick_start_admin>` section if you wish to monitor Envoy or
 retrieve stats or configuration information.
 
 The following sections walk through the dynamic configuration provided in the
@@ -37,6 +37,7 @@ The :ref:`node <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.node>` should s
     :linenos:
     :lines: 1-5
     :emphasize-lines: 1-3
+    :caption: :download:`envoy-dynamic-control-plane-demo.yaml <_include/envoy-dynamic-control-plane-demo.yaml>`
 
 .. _start_quick_start_dynamic_dynamic_resources:
 
@@ -45,7 +46,7 @@ The :ref:`node <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.node>` should s
 
 The :ref:`dynamic_resources <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.dynamic_resources>` specify
 the configuration to load dynamically, and the :ref:`cluster <start_quick_start_dynamic_static_resources>`
-to connect to for dynamic configuration updates.
+to connect for dynamic configuration updates.
 
 In this example, the configuration is provided by the ``xds_cluster`` configured below.
 
@@ -55,6 +56,7 @@ In this example, the configuration is provided by the ``xds_cluster`` configured
     :lines: 3-19
     :lineno-start: 3
     :emphasize-lines: 3-15
+    :caption: :download:`envoy-dynamic-control-plane-demo.yaml <_include/envoy-dynamic-control-plane-demo.yaml>`
 
 .. _start_quick_start_dynamic_static_resources:
 
@@ -69,29 +71,7 @@ The ``xds_cluster`` is configured to query a control plane at http://my-control-
 .. literalinclude:: _include/envoy-dynamic-control-plane-demo.yaml
     :language: yaml
     :linenos:
-    :lines: 17-35
+    :lines: 17-38
     :lineno-start: 17
-    :emphasize-lines: 3-17
-
-.. _start_quick_start_dynamic_admin:
-
-``admin``
----------
-
-Configuring the :ref:`admin <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.admin>` section is
-the same as for :ref:`static configuration <start_quick_start_static_admin>`.
-
-Enabling the :ref:`admin <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.admin>` interface with
-dynamic configuration, allows you to use the :ref:`config_dump <operations_admin_interface_config_dump>`
-endpoint to see how Envoy is currently configured.
-
-.. literalinclude:: _include/envoy-dynamic-control-plane-demo.yaml
-    :language: yaml
-    :linenos:
-    :lines: 33-40
-    :lineno-start: 33
-    :emphasize-lines: 3-8
-
-.. warning::
-
-   You may wish to restrict the network address the admin server listens to in your own deployment.
+    :emphasize-lines: 3-20
+    :caption: :download:`envoy-dynamic-control-plane-demo.yaml <_include/envoy-dynamic-control-plane-demo.yaml>`

@@ -1,8 +1,9 @@
-#include "common/network/utility.h"
-#include "common/router/string_accessor_impl.h"
-#include "common/stream_info/filter_state_impl.h"
-
-#include "extensions/filters/common/expr/context.h"
+#include "source/common/network/utility.h"
+#include "source/common/protobuf/protobuf.h"
+#include "source/common/router/string_accessor_impl.h"
+#include "source/common/stream_info/filter_state_impl.h"
+#include "source/extensions/filters/common/expr/cel_state.h"
+#include "source/extensions/filters/common/expr/context.h"
 
 #include "test/mocks/ssl/mocks.h"
 #include "test/mocks/stream_info/mocks.h"
@@ -31,6 +32,8 @@ TEST(Context, EmptyHeadersAttributes) {
   EXPECT_FALSE(header.has_value());
   EXPECT_EQ(0, headers.size());
   EXPECT_TRUE(headers.empty());
+  EXPECT_TRUE(headers.ListKeys().ok());
+  EXPECT_EQ(0, headers.ListKeys().value()->size());
 }
 
 TEST(Context, InvalidRequest) {
@@ -60,10 +63,6 @@ TEST(Context, RequestAttributes) {
   absl::optional<std::chrono::nanoseconds> dur = std::chrono::nanoseconds(15000000);
   EXPECT_CALL(info, requestComplete()).WillRepeatedly(Return(dur));
   EXPECT_CALL(info, protocol()).WillRepeatedly(Return(Http::Protocol::Http2));
-
-  // stub methods
-  EXPECT_EQ(0, request.size());
-  EXPECT_FALSE(request.empty());
 
   {
     auto value = request[CelValue::CreateStringView(Undefined)];
@@ -106,6 +105,13 @@ TEST(Context, RequestAttributes) {
     EXPECT_TRUE(value.has_value());
     ASSERT_TRUE(value.value().IsString());
     EXPECT_EQ("/meow", value.value().StringOrDie().value());
+  }
+
+  {
+    auto value = request[CelValue::CreateStringView(Query)];
+    EXPECT_TRUE(value.has_value());
+    ASSERT_TRUE(value.value().IsString());
+    EXPECT_EQ("yes=1", value.value().StringOrDie().value());
   }
 
   {
@@ -172,7 +178,9 @@ TEST(Context, RequestAttributes) {
     ASSERT_TRUE(value.value().IsMap());
     auto& map = *value.value().MapOrDie();
     EXPECT_FALSE(map.empty());
-    EXPECT_EQ(10, map.size());
+    EXPECT_EQ(9, map.size());
+    EXPECT_TRUE(map.ListKeys().ok());
+    EXPECT_EQ(9, map.ListKeys().value()->size());
 
     auto header = map[CelValue::CreateStringView(Referer)];
     EXPECT_TRUE(header.has_value());
@@ -234,6 +242,30 @@ TEST(Context, RequestFallbackAttributes) {
     EXPECT_TRUE(value.has_value());
     ASSERT_TRUE(value.value().IsString());
     EXPECT_EQ("/meow", value.value().StringOrDie().value());
+  }
+
+  {
+    auto value = request[CelValue::CreateStringView(Query)];
+    EXPECT_TRUE(value.has_value());
+    ASSERT_TRUE(value.value().IsString());
+    EXPECT_EQ("", value.value().StringOrDie().value());
+  }
+}
+
+TEST(Context, RequestPathFragment) {
+  NiceMock<StreamInfo::MockStreamInfo> info;
+  Http::TestRequestHeaderMapImpl header_map{
+      {":method", "POST"},
+      {":scheme", "http"},
+      {":path", "/meow?page=1&item=3#heading"},
+  };
+  Protobuf::Arena arena;
+  RequestWrapper request(arena, &header_map, info);
+  {
+    auto value = request[CelValue::CreateStringView(Query)];
+    EXPECT_TRUE(value.has_value());
+    ASSERT_TRUE(value.value().IsString());
+    EXPECT_EQ("page=1&item=3", value.value().StringOrDie().value());
   }
 }
 
@@ -437,17 +469,17 @@ TEST(Context, ConnectionAttributes) {
   Network::Address::InstanceConstSharedPtr upstream_local_address =
       Network::Utility::parseInternetAddress("10.1.2.3", 1000, false);
   const std::string sni_name = "kittens.com";
-  EXPECT_CALL(info, downstreamLocalAddress()).WillRepeatedly(ReturnRef(local));
-  EXPECT_CALL(info, downstreamRemoteAddress()).WillRepeatedly(ReturnRef(remote));
-  EXPECT_CALL(info, downstreamSslConnection()).WillRepeatedly(Return(downstream_ssl_info));
-  EXPECT_CALL(info, upstreamSslConnection()).WillRepeatedly(Return(upstream_ssl_info));
-  EXPECT_CALL(info, upstreamHost()).WillRepeatedly(Return(upstream_host));
-  EXPECT_CALL(info, requestedServerName()).WillRepeatedly(ReturnRef(sni_name));
-  EXPECT_CALL(info, upstreamLocalAddress()).WillRepeatedly(ReturnRef(upstream_local_address));
+  info.downstream_connection_info_provider_->setLocalAddress(local);
+  info.downstream_connection_info_provider_->setRemoteAddress(remote);
+  info.downstream_connection_info_provider_->setRequestedServerName(sni_name);
+  info.downstream_connection_info_provider_->setSslConnection(downstream_ssl_info);
   const std::string upstream_transport_failure_reason = "ConnectionTermination";
-  EXPECT_CALL(info, upstreamTransportFailureReason())
-      .WillRepeatedly(ReturnRef(upstream_transport_failure_reason));
+  info.upstreamInfo()->setUpstreamSslConnection(upstream_ssl_info);
+  info.upstreamInfo()->setUpstreamHost(upstream_host);
+  info.upstreamInfo()->setUpstreamLocalAddress(upstream_local_address);
+  info.upstreamInfo()->setUpstreamTransportFailureReason(upstream_transport_failure_reason);
   EXPECT_CALL(info, connectionID()).WillRepeatedly(Return(123));
+  info.downstream_connection_info_provider_->setConnectionID(123);
   const absl::optional<std::string> connection_termination_details = "unauthorized";
   EXPECT_CALL(info, connectionTerminationDetails())
       .WillRepeatedly(ReturnRef(connection_termination_details));
@@ -481,6 +513,11 @@ TEST(Context, ConnectionAttributes) {
   EXPECT_CALL(*downstream_ssl_info, subjectPeerCertificate())
       .WillRepeatedly(ReturnRef(subject_peer));
   EXPECT_CALL(*upstream_ssl_info, subjectPeerCertificate()).WillRepeatedly(ReturnRef(subject_peer));
+  const std::string peer_certificate_digest = "c58ccaf8e9276ebd095652e56e89c7d56e92e6c0";
+  EXPECT_CALL(*downstream_ssl_info, sha256PeerCertificateDigest())
+      .WillRepeatedly(ReturnRef(peer_certificate_digest));
+  EXPECT_CALL(*upstream_ssl_info, sha256PeerCertificateDigest())
+      .WillRepeatedly(ReturnRef(peer_certificate_digest));
 
   {
     auto value = connection[CelValue::CreateStringView(Undefined)];
@@ -608,6 +645,13 @@ TEST(Context, ConnectionAttributes) {
   }
 
   {
+    auto value = connection[CelValue::CreateStringView(SHA256PeerCertificateDigest)];
+    EXPECT_TRUE(value.has_value());
+    ASSERT_TRUE(value.value().IsString());
+    EXPECT_EQ(peer_certificate_digest, value.value().StringOrDie().value());
+  }
+
+  {
     auto value = connection[CelValue::CreateStringView(ID)];
     EXPECT_TRUE(value.has_value());
     ASSERT_TRUE(value.value().IsUint64());
@@ -671,6 +715,13 @@ TEST(Context, ConnectionAttributes) {
   }
 
   {
+    auto value = upstream[CelValue::CreateStringView(SHA256PeerCertificateDigest)];
+    EXPECT_TRUE(value.has_value());
+    ASSERT_TRUE(value.value().IsString());
+    EXPECT_EQ(peer_certificate_digest, value.value().StringOrDie().value());
+  }
+
+  {
     auto value = upstream[CelValue::CreateStringView(UpstreamLocalAddress)];
     EXPECT_TRUE(value.has_value());
     ASSERT_TRUE(value.value().IsString());
@@ -698,6 +749,8 @@ TEST(Context, FilterStateAttributes) {
   auto accessor = std::make_shared<Envoy::Router::StringAccessorImpl>(serialized);
   filter_state.setData(key, accessor, StreamInfo::FilterState::StateType::ReadOnly);
 
+  EXPECT_EQ(0, wrapper.size());
+
   {
     auto value = wrapper[CelValue::CreateStringView(missing)];
     EXPECT_FALSE(value.has_value());
@@ -708,6 +761,23 @@ TEST(Context, FilterStateAttributes) {
     EXPECT_TRUE(value.has_value());
     EXPECT_TRUE(value.value().IsBytes());
     EXPECT_EQ(serialized, value.value().BytesOrDie().value());
+  }
+
+  CelStatePrototype prototype(true, CelStateType::Protobuf,
+                              "type.googleapis.com/google.protobuf.DoubleValue",
+                              StreamInfo::FilterState::LifeSpan::FilterChain);
+  auto cel_state = std::make_shared<CelState>(prototype);
+  ProtobufWkt::DoubleValue v;
+  v.set_value(1.0);
+  cel_state->setValue(v.SerializeAsString());
+  const std::string cel_key = "cel_state_key";
+  filter_state.setData(cel_key, cel_state, StreamInfo::FilterState::StateType::ReadOnly);
+
+  {
+    auto value = wrapper[CelValue::CreateStringView(cel_key)];
+    EXPECT_TRUE(value.has_value());
+    EXPECT_TRUE(value.value().IsDouble());
+    EXPECT_EQ(value.value().DoubleOrDie(), 1.0);
   }
 }
 

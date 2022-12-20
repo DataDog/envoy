@@ -1,6 +1,6 @@
 #pragma once
 
-#include "common/config/utility.h"
+#include "source/common/config/utility.h"
 
 #include "test/mocks/stats/mocks.h"
 #include "test/test_common/simulated_time_system.h"
@@ -11,6 +11,7 @@
 namespace Envoy {
 namespace Config {
 
+enum class LegacyOrUnified { Legacy, Unified };
 const uint64_t TEST_TIME_MILLIS = 42000;
 
 /**
@@ -108,6 +109,14 @@ public:
   virtual void callInitFetchTimeoutCb() PURE;
 
   virtual void doSubscriptionTearDown() {}
+
+  // Helper util to convert to absl::flat_hash_set when calling Subscription interface methods.
+  absl::flat_hash_set<std::string> flattenResources(const std::set<std::string>& resources) {
+    absl::flat_hash_set<std::string> flat_resources;
+    std::copy(resources.begin(), resources.end(),
+              std::inserter(flat_resources, flat_resources.begin()));
+    return flat_resources;
+  }
 
   Stats::TestUtil::TestStore stats_store_;
   SubscriptionStats stats_;

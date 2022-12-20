@@ -1,14 +1,15 @@
 #include <string>
 
-#include "envoy/api/v2/discovery.pb.h"
 #include "envoy/config/bootstrap/v3/bootstrap.pb.h"
 #include "envoy/config/core/v3/grpc_service.pb.h"
 #include "envoy/http/filter.h"
 #include "envoy/secret/secret_provider.h"
+#include "envoy/service/discovery/v3/discovery.pb.h"
 
-#include "common/config/datasource.h"
-#include "common/grpc/common.h"
+#include "source/common/config/datasource.h"
+#include "source/common/grpc/common.h"
 
+#include "test/config/v2_link_hacks.h"
 #include "test/extensions/filters/http/common/empty_http_filter_config.h"
 #include "test/integration/http_integration.h"
 #include "test/integration/utility.h"
@@ -58,8 +59,10 @@ class SdsGenericSecretTestFilterConfig
 public:
   SdsGenericSecretTestFilterConfig()
       : Extensions::HttpFilters::Common::EmptyHttpFilterConfig("sds-generic-secret-test") {
+    config_source_.set_resource_api_version(envoy::config::core::v3::ApiVersion::V3);
     auto* api_config_source = config_source_.mutable_api_config_source();
     api_config_source->set_api_type(envoy::config::core::v3::ApiConfigSource::GRPC);
+    api_config_source->set_transport_api_version(envoy::config::core::v3::V3);
     auto* grpc_service = api_config_source->add_grpc_services();
     grpc_service->mutable_envoy_grpc()->set_cluster_name("sds_cluster");
   }
@@ -72,7 +75,8 @@ public:
             .clusterManagerFactory()
             .secretManager()
             .findOrCreateGenericSecretProvider(config_source_, "encryption_key",
-                                               factory_context.getTransportSocketFactoryContext());
+                                               factory_context.getTransportSocketFactoryContext(),
+                                               factory_context.initManager());
     return
         [&factory_context, secret_provider](Http::FilterChainFactoryCallbacks& callbacks) -> void {
           callbacks.addStreamDecoderFilter(std::make_shared<::Envoy::SdsGenericSecretTestFilter>(
@@ -88,17 +92,17 @@ class SdsGenericSecretIntegrationTest : public Grpc::GrpcClientIntegrationParamT
                                         public HttpIntegrationTest {
 public:
   SdsGenericSecretIntegrationTest()
-      : HttpIntegrationTest(Http::CodecClient::Type::HTTP1, ipVersion()), registration_(factory_) {}
+      : HttpIntegrationTest(Http::CodecType::HTTP1, ipVersion()), registration_(factory_) {}
 
   void initialize() override {
     config_helper_.addConfigModifier([](envoy::config::bootstrap::v3::Bootstrap& bootstrap) {
       auto* sds_cluster = bootstrap.mutable_static_resources()->add_clusters();
       sds_cluster->MergeFrom(bootstrap.static_resources().clusters()[0]);
       sds_cluster->set_name("sds_cluster");
-      sds_cluster->mutable_http2_protocol_options();
+      ConfigHelper::setHttp2(*sds_cluster);
     });
 
-    config_helper_.addFilter("{ name: sds-generic-secret-test }");
+    config_helper_.prependFilter("{ name: sds-generic-secret-test }");
 
     create_xds_upstream_ = true;
     HttpIntegrationTest::initialize();
@@ -118,10 +122,10 @@ public:
     secret.set_name("encryption_key");
     auto* generic_secret = secret.mutable_generic_secret();
     generic_secret->mutable_secret()->set_inline_string("DUMMY_AES_128_KEY");
-    API_NO_BOOST(envoy::api::v2::DiscoveryResponse) discovery_response;
+    envoy::service::discovery::v3::DiscoveryResponse discovery_response;
     discovery_response.set_version_info("0");
     discovery_response.set_type_url(Config::TypeUrl::get().Secret);
-    discovery_response.add_resources()->PackFrom(API_DOWNGRADE(secret));
+    discovery_response.add_resources()->PackFrom(secret);
     xds_stream_->sendGrpcMessage(discovery_response);
   }
 

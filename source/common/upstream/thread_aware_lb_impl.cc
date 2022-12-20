@@ -1,4 +1,4 @@
-#include "common/upstream/thread_aware_lb_impl.h"
+#include "source/common/upstream/thread_aware_lb_impl.h"
 
 #include <memory>
 #include <random>
@@ -94,7 +94,7 @@ void ThreadAwareLoadBalancerBase::initialize() {
   // I will look into doing this in a follow up. Doing everything using a background thread heavily
   // complicated initialization as the load balancer would need its own initialized callback. I
   // think the synchronous/asynchronous split is probably the best option.
-  priority_set_.addPriorityUpdateCb(
+  priority_update_cb_ = priority_set_.addPriorityUpdateCb(
       [this](uint32_t, const HostVector&, const HostVector&) -> void { refresh(); });
 
   refresh();
@@ -141,6 +141,8 @@ ThreadAwareLoadBalancerBase::LoadBalancerImpl::chooseHost(LoadBalancerContext* c
     return nullptr;
   }
 
+  HostConstSharedPtr host;
+
   // If there is no hash in the context, just choose a random value (this effectively becomes
   // the random LB but it won't crash if someone configures it this way).
   // computeHashKey() may be computed on demand, so get it only once.
@@ -158,7 +160,6 @@ ThreadAwareLoadBalancerBase::LoadBalancerImpl::chooseHost(LoadBalancerContext* c
     stats_.lb_healthy_panic_.inc();
   }
 
-  HostConstSharedPtr host;
   const uint32_t max_attempts = context ? context->hostSelectionRetryCount() + 1 : 1;
   for (uint32_t i = 0; i < max_attempts; ++i) {
     host = per_priority_state->current_lb_->chooseHost(h, i);
@@ -181,7 +182,6 @@ LoadBalancerPtr ThreadAwareLoadBalancerBase::LoadBalancerFactoryImpl::create() {
   lb->healthy_per_priority_load_ = healthy_per_priority_load_;
   lb->degraded_per_priority_load_ = degraded_per_priority_load_;
   lb->per_priority_state_ = per_priority_state_;
-
   return lb;
 }
 
@@ -190,7 +190,7 @@ double ThreadAwareLoadBalancerBase::BoundedLoadHashingLoadBalancer::hostOverload
   // TODO(scheler): This will not work if rq_active cluster stat is disabled, need to detect
   // and alert the user if that's the case.
 
-  const uint32_t overall_active = host.cluster().stats().upstream_rq_active_.value();
+  const uint32_t overall_active = host.cluster().trafficStats().upstream_rq_active_.value();
   const uint32_t host_active = host.stats().rq_active_.value();
 
   const uint32_t total_slots = ((overall_active + 1) * hash_balance_factor_ + 99) / 100;

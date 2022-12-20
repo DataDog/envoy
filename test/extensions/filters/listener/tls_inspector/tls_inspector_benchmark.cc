@@ -1,11 +1,11 @@
 #include <vector>
 
-#include "common/api/os_sys_calls_impl.h"
-#include "common/http/utility.h"
-#include "common/network/io_socket_handle_impl.h"
-#include "common/network/listen_socket_impl.h"
-
-#include "extensions/filters/listener/tls_inspector/tls_inspector.h"
+#include "source/common/api/os_sys_calls_impl.h"
+#include "source/common/http/utility.h"
+#include "source/common/network/io_socket_handle_impl.h"
+#include "source/common/network/listen_socket_impl.h"
+#include "source/common/network/listener_filter_buffer_impl.h"
+#include "source/extensions/filters/listener/tls_inspector/tls_inspector.h"
 
 #include "test/extensions/filters/listener/tls_inspector/tls_utility.h"
 #include "test/mocks/api/mocks.h"
@@ -26,14 +26,10 @@ namespace TlsInspector {
 
 class FastMockListenerFilterCallbacks : public Network::MockListenerFilterCallbacks {
 public:
-  FastMockListenerFilterCallbacks(Network::ConnectionSocket& socket, Event::Dispatcher& dispatcher)
-      : socket_(socket), dispatcher_(dispatcher) {}
+  FastMockListenerFilterCallbacks(Network::ConnectionSocket& socket) : socket_(socket) {}
   Network::ConnectionSocket& socket() override { return socket_; }
-  Event::Dispatcher& dispatcher() override { return dispatcher_; }
-  void continueFilterChain(bool success) override { RELEASE_ASSERT(success, ""); }
 
   Network::ConnectionSocket& socket_;
-  Event::Dispatcher& dispatcher_;
 };
 
 // Don't inherit from the mock implementation at all, because this is instantiated
@@ -41,6 +37,8 @@ public:
 class FastMockFileEvent : public Event::FileEvent {
   void activate(uint32_t) override {}
   void setEnabled(uint32_t) override {}
+  void unregisterEventIfEmulatedEdge(uint32_t) override {}
+  void registerEventIfEmulatedEdge(uint32_t) override {}
 };
 
 class FastMockDispatcher : public Event::MockDispatcher {
@@ -73,16 +71,23 @@ static void BM_TlsInspector(benchmark::State& state) {
       "\x02h2\x08http/1.1"));
   TestThreadsafeSingletonInjector<Api::OsSysCallsImpl> os_calls{&os_sys_calls};
   NiceMock<Stats::MockStore> store;
-  ConfigSharedPtr cfg(std::make_shared<Config>(store));
+  envoy::extensions::filters::listener::tls_inspector::v3::TlsInspector proto_config;
+  ConfigSharedPtr cfg(std::make_shared<Config>(store, proto_config));
   Network::IoHandlePtr io_handle = std::make_unique<Network::IoSocketHandleImpl>();
   Network::ConnectionSocketImpl socket(std::move(io_handle), nullptr, nullptr);
   NiceMock<FastMockDispatcher> dispatcher;
-  FastMockListenerFilterCallbacks cb(socket, dispatcher);
+  FastMockListenerFilterCallbacks cb(socket);
+  Network::ListenerFilterBufferImpl buffer(
+      socket.ioHandle(), dispatcher, [](bool) {}, [](Network::ListenerFilterBuffer&) {},
+      cfg->maxClientHelloSize());
+  dispatcher.file_event_callback_(Event::FileReadyType::Read);
 
   for (auto _ : state) {
+    UNREFERENCED_PARAMETER(_);
     Filter filter(cfg);
     filter.onAccept(cb);
-    RELEASE_ASSERT(dispatcher.file_event_callback_ == nullptr, "");
+    auto filter_state = filter.onData(buffer);
+    RELEASE_ASSERT(filter_state == Network::FilterStatus::Continue, "");
     RELEASE_ASSERT(socket.detectedTransportProtocol() == "tls", "");
     RELEASE_ASSERT(socket.requestedServerName() == "example.com", "");
     RELEASE_ASSERT(socket.requestedApplicationProtocols().size() == 2 &&

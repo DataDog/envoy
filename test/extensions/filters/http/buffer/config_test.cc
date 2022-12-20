@@ -1,8 +1,8 @@
 #include "envoy/extensions/filters/http/buffer/v3/buffer.pb.h"
 #include "envoy/extensions/filters/http/buffer/v3/buffer.pb.validate.h"
 
-#include "extensions/filters/http/buffer/buffer_filter.h"
-#include "extensions/filters/http/buffer/config.h"
+#include "source/extensions/filters/http/buffer/buffer_filter.h"
+#include "source/extensions/filters/http/buffer/config.h"
 
 #include "test/mocks/server/factory_context.h"
 #include "test/mocks/server/instance.h"
@@ -39,6 +39,18 @@ TEST(BufferFilterFactoryTest, BufferFilterCorrectProto) {
   config.mutable_max_request_bytes()->set_value(1028);
 
   NiceMock<Server::Configuration::MockFactoryContext> context;
+  BufferFilterFactory factory;
+  Http::FilterFactoryCb cb = factory.createFilterFactoryFromProto(config, "stats", context);
+  Http::MockFilterChainFactoryCallbacks filter_callback;
+  EXPECT_CALL(filter_callback, addStreamDecoderFilter(_));
+  cb(filter_callback);
+}
+
+TEST(BufferFilterFactoryTest, BufferFilterCorrectProtoUpstreamFactory) {
+  envoy::extensions::filters::http::buffer::v3::Buffer config;
+  config.mutable_max_request_bytes()->set_value(1028);
+
+  NiceMock<Server::Configuration::MockUpstreamHttpFactoryContext> context;
   BufferFilterFactory factory;
   Http::FilterFactoryCb cb = factory.createFilterFactoryFromProto(config, "stats", context);
   Http::MockFilterChainFactoryCallbacks filter_callback;
@@ -98,16 +110,6 @@ TEST(BufferFilterFactoryTest, BufferFilterRouteSpecificConfig) {
 
   const auto* inflated = dynamic_cast<const BufferFilterSettings*>(route_config.get());
   EXPECT_TRUE(inflated);
-}
-
-// Test that the deprecated extension name still functions.
-TEST(BufferFilterFactoryTest, DEPRECATED_FEATURE_TEST(DeprecatedExtensionFilterName)) {
-  const std::string deprecated_name = "envoy.buffer";
-
-  ASSERT_NE(
-      nullptr,
-      Registry::FactoryRegistry<Server::Configuration::NamedHttpFilterConfigFactory>::getFactory(
-          deprecated_name));
 }
 
 } // namespace

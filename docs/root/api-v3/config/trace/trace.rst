@@ -1,5 +1,11 @@
-HTTP Tracers
-==============
+.. _http_tracers:
+
+HTTP tracers
+============
+
+.. note::
+
+ Tracers are not supported on Windows.
 
 .. toctree::
   :glob:

@@ -1,12 +1,12 @@
-#include "common/config/grpc_mux_impl.h"
+#include "source/common/config/grpc_mux_impl.h"
 
 #include "envoy/service/discovery/v3/discovery.pb.h"
 
-#include "common/config/decoded_resource_impl.h"
-#include "common/config/utility.h"
-#include "common/config/version_converter.h"
-#include "common/memory/utils.h"
-#include "common/protobuf/protobuf.h"
+#include "source/common/config/decoded_resource_impl.h"
+#include "source/common/config/utility.h"
+#include "source/common/config/xds_source_id.h"
+#include "source/common/memory/utils.h"
+#include "source/common/protobuf/protobuf.h"
 
 #include "absl/container/btree_map.h"
 #include "absl/container/node_hash_set.h"
@@ -14,25 +14,67 @@
 namespace Envoy {
 namespace Config {
 
+namespace {
+class AllMuxesState {
+public:
+  void insert(GrpcMuxImpl* mux) { muxes_.insert(mux); }
+
+  void erase(GrpcMuxImpl* mux) { muxes_.erase(mux); }
+
+  void shutdownAll() {
+    for (auto& mux : muxes_) {
+      mux->shutdown();
+    }
+  }
+
+private:
+  absl::flat_hash_set<GrpcMuxImpl*> muxes_;
+};
+using AllMuxes = ThreadSafeSingleton<AllMuxesState>;
+} // namespace
+
 GrpcMuxImpl::GrpcMuxImpl(const LocalInfo::LocalInfo& local_info,
                          Grpc::RawAsyncClientPtr async_client, Event::Dispatcher& dispatcher,
                          const Protobuf::MethodDescriptor& service_method,
-                         envoy::config::core::v3::ApiVersion transport_api_version,
                          Random::RandomGenerator& random, Stats::Scope& scope,
-                         const RateLimitSettings& rate_limit_settings, bool skip_subsequent_node)
+                         const RateLimitSettings& rate_limit_settings, bool skip_subsequent_node,
+                         CustomConfigValidatorsPtr&& config_validators,
+                         XdsResourcesDelegateOptRef xds_resources_delegate,
+                         const std::string& target_xds_authority)
     : grpc_stream_(this, std::move(async_client), service_method, random, dispatcher, scope,
                    rate_limit_settings),
       local_info_(local_info), skip_subsequent_node_(skip_subsequent_node),
-      first_stream_request_(true), transport_api_version_(transport_api_version),
-      dispatcher_(dispatcher),
-      enable_type_url_downgrade_and_upgrade_(Runtime::runtimeFeatureEnabled(
-          "envoy.reloadable_features.enable_type_url_downgrade_and_upgrade")) {
+      config_validators_(std::move(config_validators)),
+      xds_resources_delegate_(xds_resources_delegate), target_xds_authority_(target_xds_authority),
+      first_stream_request_(true), dispatcher_(dispatcher),
+      dynamic_update_callback_handle_(local_info.contextProvider().addDynamicContextUpdateCallback(
+          [this](absl::string_view resource_type_url) {
+            onDynamicContextUpdate(resource_type_url);
+          })) {
   Config::Utility::checkLocalInfo("ads", local_info);
+  AllMuxes::get().insert(this);
+}
+
+GrpcMuxImpl::~GrpcMuxImpl() { AllMuxes::get().erase(this); }
+
+void GrpcMuxImpl::shutdownAll() { AllMuxes::get().shutdownAll(); }
+
+void GrpcMuxImpl::onDynamicContextUpdate(absl::string_view resource_type_url) {
+  auto api_state = api_state_.find(resource_type_url);
+  if (api_state == api_state_.end()) {
+    return;
+  }
+  api_state->second->must_send_node_ = true;
+  queueDiscoveryRequest(resource_type_url);
 }
 
 void GrpcMuxImpl::start() { grpc_stream_.establishNewStream(); }
 
-void GrpcMuxImpl::sendDiscoveryRequest(const std::string& type_url) {
+void GrpcMuxImpl::sendDiscoveryRequest(absl::string_view type_url) {
+  if (shutdown_) {
+    return;
+  }
+
   ApiState& api_state = apiStateFor(type_url);
   auto& request = api_state.request_;
   request.mutable_resource_names()->Clear();
@@ -48,11 +90,14 @@ void GrpcMuxImpl::sendDiscoveryRequest(const std::string& type_url) {
     }
   }
 
-  if (skip_subsequent_node_ && !first_stream_request_) {
+  if (api_state.must_send_node_ || !skip_subsequent_node_ || first_stream_request_) {
+    // Node may have been cleared during a previous request.
+    request.mutable_node()->CopyFrom(local_info_.node());
+    api_state.must_send_node_ = false;
+  } else {
     request.clear_node();
   }
-  VersionConverter::prepareMessageForGrpcWire(request, transport_api_version_);
-  ENVOY_LOG(trace, "Sending DiscoveryRequest for {}: {}", type_url, request.DebugString());
+  ENVOY_LOG(trace, "Sending DiscoveryRequest for {}: {}", type_url, request.ShortDebugString());
   grpc_stream_.sendMessage(request);
   first_stream_request_ = false;
 
@@ -62,10 +107,62 @@ void GrpcMuxImpl::sendDiscoveryRequest(const std::string& type_url) {
   }
 }
 
+void GrpcMuxImpl::loadConfigFromDelegate(const std::string& type_url,
+                                         const absl::flat_hash_set<std::string>& resource_names) {
+  if (!xds_resources_delegate_.has_value()) {
+    return;
+  }
+  ApiState& api_state = apiStateFor(type_url);
+  if (api_state.watches_.empty()) {
+    // No watches, so exit without loading config from storage.
+    return;
+  }
+
+  const XdsConfigSourceId source_id{target_xds_authority_, type_url};
+  TRY_ASSERT_MAIN_THREAD {
+    std::vector<envoy::service::discovery::v3::Resource> resources =
+        xds_resources_delegate_->getResources(source_id, resource_names);
+    if (resources.empty()) {
+      // There are no persisted resources, so nothing to process.
+      return;
+    }
+
+    std::vector<DecodedResourcePtr> decoded_resources;
+    OpaqueResourceDecoder& resource_decoder = *api_state.watches_.front()->resource_decoder_;
+    std::string version_info;
+    for (const auto& resource : resources) {
+      if (version_info.empty()) {
+        version_info = resource.version();
+      } else {
+        ASSERT(resource.version() == version_info);
+      }
+
+      TRY_ASSERT_MAIN_THREAD {
+        decoded_resources.emplace_back(
+            std::make_unique<DecodedResourceImpl>(resource_decoder, resource));
+      }
+      END_TRY
+      catch (const EnvoyException& e) {
+        xds_resources_delegate_->onResourceLoadFailed(source_id, resource.name(), e);
+      }
+    }
+
+    processDiscoveryResources(decoded_resources, api_state, type_url, version_info,
+                              /*call_delegate=*/false);
+  }
+  END_TRY
+  catch (const EnvoyException& e) {
+    // TODO(abeyad): do something else here?
+    ENVOY_LOG_MISC(warn, "Failed to load config from delegate for {}: {}", source_id.toKey(),
+                   e.what());
+  }
+}
+
 GrpcMuxWatchPtr GrpcMuxImpl::addWatch(const std::string& type_url,
-                                      const std::set<std::string>& resources,
+                                      const absl::flat_hash_set<std::string>& resources,
                                       SubscriptionCallbacks& callbacks,
-                                      OpaqueResourceDecoder& resource_decoder, const bool) {
+                                      OpaqueResourceDecoderSharedPtr resource_decoder,
+                                      const SubscriptionOptions&) {
   auto watch =
       std::make_unique<GrpcMuxWatchImpl>(resources, callbacks, resource_decoder, type_url, *this);
   ENVOY_LOG(debug, "gRPC mux addWatch for " + type_url);
@@ -79,9 +176,6 @@ GrpcMuxWatchPtr GrpcMuxImpl::addWatch(const std::string& type_url,
     apiStateFor(type_url).request_.mutable_node()->MergeFrom(local_info_.node());
     apiStateFor(type_url).subscribed_ = true;
     subscriptions_.emplace_back(type_url);
-    if (enable_type_url_downgrade_and_upgrade_) {
-      registerVersionedTypeUrl(type_url);
-    }
   }
 
   // This will send an updated request on each subscription.
@@ -107,11 +201,12 @@ ScopedResume GrpcMuxImpl::pause(const std::vector<std::string> type_urls) {
   return std::make_unique<Cleanup>([this, type_urls]() {
     for (const auto& type_url : type_urls) {
       ApiState& api_state = apiStateFor(type_url);
-      ENVOY_LOG(debug, "Resuming discovery requests for {} (previous count {})", type_url,
-                api_state.pauses_);
+      ENVOY_LOG(debug, "Decreasing pause count on discovery requests for {} (previous count {})",
+                type_url, api_state.pauses_);
       ASSERT(api_state.paused());
 
       if (--api_state.pauses_ == 0 && api_state.pending_ && api_state.subscribed_) {
+        ENVOY_LOG(debug, "Resuming discovery requests for {}", type_url);
         queueDiscoveryRequest(type_url);
         api_state.pending_ = false;
       }
@@ -119,36 +214,11 @@ ScopedResume GrpcMuxImpl::pause(const std::vector<std::string> type_urls) {
   });
 }
 
-void GrpcMuxImpl::registerVersionedTypeUrl(const std::string& type_url) {
-  TypeUrlMap& type_url_map = typeUrlMap();
-  if (type_url_map.find(type_url) != type_url_map.end()) {
-    return;
-  }
-  // If type_url is v3, earlier_type_url will contain v2 type url.
-  const absl::optional<std::string> earlier_type_url = ApiTypeOracle::getEarlierTypeUrl(type_url);
-  // Register v2 to v3 and v3 to v2 type_url mapping in the hash map.
-  if (earlier_type_url.has_value()) {
-    type_url_map[earlier_type_url.value()] = type_url;
-    type_url_map[type_url] = earlier_type_url.value();
-  }
-}
-
 void GrpcMuxImpl::onDiscoveryResponse(
     std::unique_ptr<envoy::service::discovery::v3::DiscoveryResponse>&& message,
     ControlPlaneStats& control_plane_stats) {
-  std::string type_url = message->type_url();
+  const std::string type_url = message->type_url();
   ENVOY_LOG(debug, "Received gRPC message for {} at version {}", type_url, message->version_info());
-  if (message->has_control_plane()) {
-    control_plane_stats.identifier_.set(message->control_plane().identifier());
-  }
-  // If this type url is not watched(no subscriber or no watcher), try another version of type url.
-  if (enable_type_url_downgrade_and_upgrade_ && api_state_.count(type_url) == 0) {
-    registerVersionedTypeUrl(type_url);
-    TypeUrlMap& type_url_map = typeUrlMap();
-    if (type_url_map.find(type_url) != type_url_map.end()) {
-      type_url = type_url_map[type_url];
-    }
-  }
   if (api_state_.count(type_url) == 0) {
     // TODO(yuval-k): This should never happen. consider dropping the stream as this is a
     // protocol violation
@@ -157,16 +227,28 @@ void GrpcMuxImpl::onDiscoveryResponse(
     return;
   }
 
-  if (apiStateFor(type_url).watches_.empty()) {
+  ApiState& api_state = apiStateFor(type_url);
+
+  if (message->has_control_plane()) {
+    control_plane_stats.identifier_.set(message->control_plane().identifier());
+
+    if (message->control_plane().identifier() != api_state.control_plane_identifier_) {
+      api_state.control_plane_identifier_ = message->control_plane().identifier();
+      ENVOY_LOG(debug, "Receiving gRPC updates for {} from {}", type_url,
+                api_state.control_plane_identifier_);
+    }
+  }
+
+  if (api_state.watches_.empty()) {
     // update the nonce as we are processing this response.
-    apiStateFor(type_url).request_.set_response_nonce(message->nonce());
+    api_state.request_.set_response_nonce(message->nonce());
     if (message->resources().empty()) {
       // No watches and no resources. This can happen when envoy unregisters from a
       // resource that's removed from the server as well. For example, a deleted cluster
       // triggers un-watching the ClusterLoadAssignment watch, and at the same time the
       // xDS server sends an empty list of ClusterLoadAssignment resources. we'll accept
       // this update. no need to send a discovery request, as we don't watch for anything.
-      apiStateFor(type_url).request_.set_version_info(message->version_info());
+      api_state.request_.set_version_info(message->version_info());
     } else {
       // No watches and we have resources - this should not happen. send a NACK (by not
       // updating the version).
@@ -181,83 +263,111 @@ void GrpcMuxImpl::onDiscoveryResponse(
   // the delta state. The proper fix for this is to converge these implementations,
   // see https://github.com/envoyproxy/envoy/issues/11477.
   same_type_resume = pause(type_url);
-  try {
-    // To avoid O(n^2) explosion (e.g. when we have 1000s of EDS watches), we
-    // build a map here from resource name to resource and then walk watches_.
-    // We have to walk all watches (and need an efficient map as a result) to
-    // ensure we deliver empty config updates when a resource is dropped. We make the map ordered
-    // for test determinism.
-    std::vector<DecodedResourceImplPtr> resources;
-    absl::btree_map<std::string, DecodedResourceRef> resource_ref_map;
-    std::vector<DecodedResourceRef> all_resource_refs;
-    OpaqueResourceDecoder& resource_decoder =
-        apiStateFor(type_url).watches_.front()->resource_decoder_;
-
-    const auto scoped_ttl_update = apiStateFor(type_url).ttl_.scopedTtlUpdate();
+  TRY_ASSERT_MAIN_THREAD {
+    std::vector<DecodedResourcePtr> resources;
+    OpaqueResourceDecoder& resource_decoder = *api_state.watches_.front()->resource_decoder_;
 
     for (const auto& resource : message->resources()) {
       // TODO(snowp): Check the underlying type when the resource is a Resource.
       if (!resource.Is<envoy::service::discovery::v3::Resource>() &&
-          message->type_url() != resource.type_url()) {
+          type_url != resource.type_url()) {
         throw EnvoyException(
             fmt::format("{} does not match the message-wide type URL {} in DiscoveryResponse {}",
-                        resource.type_url(), message->type_url(), message->DebugString()));
+                        resource.type_url(), type_url, message->DebugString()));
       }
 
       auto decoded_resource =
           DecodedResourceImpl::fromResource(resource_decoder, resource, message->version_info());
 
-      if (decoded_resource->ttl()) {
-        apiStateFor(type_url).ttl_.add(*decoded_resource->ttl(), decoded_resource->name());
-      } else {
-        apiStateFor(type_url).ttl_.clear(decoded_resource->name());
-      }
-
       if (!isHeartbeatResource(type_url, *decoded_resource)) {
         resources.emplace_back(std::move(decoded_resource));
-        all_resource_refs.emplace_back(*resources.back());
-        resource_ref_map.emplace(resources.back()->name(), *resources.back());
       }
     }
 
-    for (auto watch : apiStateFor(type_url).watches_) {
-      // onConfigUpdate should be called in all cases for single watch xDS (Cluster and
-      // Listener) even if the message does not have resources so that update_empty stat
-      // is properly incremented and state-of-the-world semantics are maintained.
-      if (watch->resources_.empty()) {
-        watch->callbacks_.onConfigUpdate(all_resource_refs, message->version_info());
-        continue;
-      }
-      std::vector<DecodedResourceRef> found_resources;
-      for (const auto& watched_resource_name : watch->resources_) {
-        auto it = resource_ref_map.find(watched_resource_name);
-        if (it != resource_ref_map.end()) {
-          found_resources.emplace_back(it->second);
-        }
-      }
-
-      // onConfigUpdate should be called only on watches(clusters/routes) that have
-      // updates in the message for EDS/RDS.
-      if (!found_resources.empty()) {
-        watch->callbacks_.onConfigUpdate(found_resources, message->version_info());
-      }
-    }
-    // TODO(mattklein123): In the future if we start tracking per-resource versions, we
-    // would do that tracking here.
-    apiStateFor(type_url).request_.set_version_info(message->version_info());
-    Memory::Utils::tryShrinkHeap();
-  } catch (const EnvoyException& e) {
-    for (auto watch : apiStateFor(type_url).watches_) {
+    processDiscoveryResources(resources, api_state, type_url, message->version_info(),
+                              /*call_delegate=*/true);
+  }
+  END_TRY
+  catch (const EnvoyException& e) {
+    for (auto watch : api_state.watches_) {
       watch->callbacks_.onConfigUpdateFailed(
           Envoy::Config::ConfigUpdateFailureReason::UpdateRejected, &e);
     }
-    ::google::rpc::Status* error_detail = apiStateFor(type_url).request_.mutable_error_detail();
+    ::google::rpc::Status* error_detail = api_state.request_.mutable_error_detail();
     error_detail->set_code(Grpc::Status::WellKnownGrpcStatus::Internal);
     error_detail->set_message(Config::Utility::truncateGrpcStatusMessage(e.what()));
   }
-  apiStateFor(type_url).request_.set_response_nonce(message->nonce());
-  ASSERT(apiStateFor(type_url).paused());
+  previously_fetched_data_ = true;
+  api_state.request_.set_response_nonce(message->nonce());
+  ASSERT(api_state.paused());
   queueDiscoveryRequest(type_url);
+}
+
+void GrpcMuxImpl::processDiscoveryResources(const std::vector<DecodedResourcePtr>& resources,
+                                            ApiState& api_state, const std::string& type_url,
+                                            const std::string& version_info,
+                                            const bool call_delegate) {
+  ASSERT_IS_MAIN_OR_TEST_THREAD();
+  // To avoid O(n^2) explosion (e.g. when we have 1000s of EDS watches), we
+  // build a map here from resource name to resource and then walk watches_.
+  // We have to walk all watches (and need an efficient map as a result) to
+  // ensure we deliver empty config updates when a resource is dropped. We make the map ordered
+  // for test determinism.
+  absl::btree_map<std::string, DecodedResourceRef> resource_ref_map;
+  std::vector<DecodedResourceRef> all_resource_refs;
+
+  const auto scoped_ttl_update = api_state.ttl_.scopedTtlUpdate();
+
+  for (const auto& resource : resources) {
+    if (resource->ttl()) {
+      api_state.ttl_.add(*resource->ttl(), resource->name());
+    } else {
+      api_state.ttl_.clear(resource->name());
+    }
+
+    all_resource_refs.emplace_back(*resource);
+    resource_ref_map.emplace(resource->name(), *resource);
+  }
+
+  // Execute external config validators if there are any watches.
+  if (!api_state.watches_.empty()) {
+    config_validators_->executeValidators(type_url, resources);
+  }
+
+  for (auto watch : api_state.watches_) {
+    // onConfigUpdate should be called in all cases for single watch xDS (Cluster and
+    // Listener) even if the message does not have resources so that update_empty stat
+    // is properly incremented and state-of-the-world semantics are maintained.
+    if (watch->resources_.empty()) {
+      watch->callbacks_.onConfigUpdate(all_resource_refs, version_info);
+      continue;
+    }
+    std::vector<DecodedResourceRef> found_resources;
+    for (const auto& watched_resource_name : watch->resources_) {
+      auto it = resource_ref_map.find(watched_resource_name);
+      if (it != resource_ref_map.end()) {
+        found_resources.emplace_back(it->second);
+      }
+    }
+
+    // onConfigUpdate should be called only on watches(clusters/listeners) that have
+    // updates in the message for EDS/RDS.
+    if (!found_resources.empty()) {
+      watch->callbacks_.onConfigUpdate(found_resources, version_info);
+    }
+  }
+
+  // All config updates have been applied without throwing an exception, so we'll call the xDS
+  // resources delegate, if any.
+  if (call_delegate && xds_resources_delegate_.has_value()) {
+    xds_resources_delegate_->onConfigUpdated(XdsConfigSourceId{target_xds_authority_, type_url},
+                                             all_resource_refs);
+  }
+
+  // TODO(mattklein123): In the future if we start tracking per-resource versions, we
+  // would do that tracking here.
+  api_state.request_.set_version_info(version_info);
+  Memory::Utils::tryShrinkHeap();
 }
 
 void GrpcMuxImpl::onWriteable() { drainRequests(); }
@@ -277,10 +387,20 @@ void GrpcMuxImpl::onEstablishmentFailure() {
       watch->callbacks_.onConfigUpdateFailed(
           Envoy::Config::ConfigUpdateFailureReason::ConnectionFailure, nullptr);
     }
+    if (!previously_fetched_data_) {
+      // On the initialization of the gRPC mux, if connection to the xDS server fails, load the
+      // persisted config, if available. The locally persisted config will be used until
+      // connectivity is established with the xDS server.
+      loadConfigFromDelegate(
+          /*type_url=*/api_state.first,
+          absl::flat_hash_set<std::string>{api_state.second->request_.resource_names().begin(),
+                                           api_state.second->request_.resource_names().end()});
+      previously_fetched_data_ = true;
+    }
   }
 }
 
-void GrpcMuxImpl::queueDiscoveryRequest(const std::string& queue_item) {
+void GrpcMuxImpl::queueDiscoveryRequest(absl::string_view queue_item) {
   if (!grpc_stream_.grpcStreamAvailable()) {
     ENVOY_LOG(debug, "No stream available to queueDiscoveryRequest for {}", queue_item);
     return; // Drop this request; the reconnect will enqueue a new one.
@@ -291,11 +411,11 @@ void GrpcMuxImpl::queueDiscoveryRequest(const std::string& queue_item) {
     api_state.pending_ = true;
     return; // Drop this request; the unpause will enqueue a new one.
   }
-  request_queue_->push(queue_item);
+  request_queue_->emplace(std::string(queue_item));
   drainRequests();
 }
 
-void GrpcMuxImpl::expiryCallback(const std::string& type_url,
+void GrpcMuxImpl::expiryCallback(absl::string_view type_url,
                                  const std::vector<std::string>& expired) {
   // The TtlManager triggers a callback with a list of all the expired elements, which we need
   // to compare against the various watched resources to return the subset that each watch is
@@ -321,7 +441,7 @@ void GrpcMuxImpl::expiryCallback(const std::string& type_url,
   }
 }
 
-GrpcMuxImpl::ApiState& GrpcMuxImpl::apiStateFor(const std::string& type_url) {
+GrpcMuxImpl::ApiState& GrpcMuxImpl::apiStateFor(absl::string_view type_url) {
   auto itr = api_state_.find(type_url);
   if (itr == api_state_.end()) {
     api_state_.emplace(

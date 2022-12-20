@@ -6,57 +6,24 @@ authors = ["Piotr Sikora <piotrsikora@google.com>"]
 edition = "2018"
 
 [dependencies]
-proxy-wasm = "0.1"
-log = "0.4"
+protobuf = "2"
 
 [profile.release]
 lto = true
 opt-level = 3
 panic = "abort"
 
-[raze]
+[package.metadata.raze]
+package_aliases_dir = "."
 workspace_path = "//bazel/external/cargo"
 genmode = "Remote"
 
-[raze.crates.log.'0.4.11']
-additional_flags = ["--cfg=atomic_cas"]
-
 [[example]]
-name = "bootstrap_logging_rust"
-path = "../../../test/extensions/bootstrap/wasm/test_data/logging_rust.rs"
+name = "grpc_call_rust"
+path = "../../../test/extensions/filters/http/wasm/test_data/grpc_call_rust.rs"
 crate-type = ["cdylib"]
 
 [[example]]
-name = "http_async_call_rust"
-path = "../../../test/extensions/filters/http/wasm/test_data/async_call_rust.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "http_body_rust"
-path = "../../../test/extensions/filters/http/wasm/test_data/body_rust.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "http_headers_rust"
-path = "../../../test/extensions/filters/http/wasm/test_data/headers_rust.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "http_metadata_rust"
-path = "../../../test/extensions/filters/http/wasm/test_data/metadata_rust.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "http_shared_data_rust"
-path = "../../../test/extensions/filters/http/wasm/test_data/shared_data_rust.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "http_shared_queue_rust"
-path = "../../../test/extensions/filters/http/wasm/test_data/shared_queue_rust.rs"
-crate-type = ["cdylib"]
-
-[[example]]
-name = "network_logging_rust"
-path = "../../../test/extensions/filters/network/wasm/test_data/logging_rust.rs"
+name = "grpc_stream_rust"
+path = "../../../test/extensions/filters/http/wasm/test_data/grpc_stream_rust.rs"
 crate-type = ["cdylib"]

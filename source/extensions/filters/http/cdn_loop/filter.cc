@@ -1,13 +1,12 @@
-#include "extensions/filters/http/cdn_loop/filter.h"
+#include "source/extensions/filters/http/cdn_loop/filter.h"
 
 #include "envoy/http/codes.h"
 #include "envoy/http/filter.h"
 #include "envoy/http/header_map.h"
 
-#include "common/common/statusor.h"
-#include "common/http/headers.h"
-
-#include "extensions/filters/http/cdn_loop/utils.h"
+#include "source/common/common/statusor.h"
+#include "source/common/http/headers.h"
+#include "source/extensions/filters/http/cdn_loop/utils.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -33,7 +32,7 @@ Http::FilterHeadersStatus CdnLoopFilter::decodeHeaders(Http::RequestHeaderMap& h
       header_entry != nullptr) {
     if (StatusOr<int> count =
             countCdnLoopOccurrences(header_entry->value().getStringView(), cdn_id_);
-        !count) {
+        !count.ok()) {
       decoder_callbacks_->sendLocalReply(Http::Code::BadRequest, ParseErrorMessage, nullptr,
                                          absl::nullopt, ParseErrorDetails);
       return Http::FilterHeadersStatus::StopIteration;

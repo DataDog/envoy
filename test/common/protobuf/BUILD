@@ -3,6 +3,7 @@ load(
     "envoy_cc_fuzz_test",
     "envoy_cc_test",
     "envoy_package",
+    "envoy_proto_library",
 )
 
 licenses(["notice"])  # Apache 2
@@ -20,10 +21,24 @@ envoy_cc_test(
     ],
 )
 
+envoy_proto_library(
+    name = "utility_test_protos",
+    srcs = [
+        "utility_test_file_wip.proto",
+        "utility_test_file_wip_2.proto",
+        "utility_test_message_field_wip.proto",
+    ],
+    deps = [
+        "@com_github_cncf_udpa//udpa/annotations:pkg",
+        "@com_github_cncf_udpa//xds/annotations/v3:pkg",
+    ],
+)
+
 envoy_cc_test(
     name = "utility_test",
     srcs = ["utility_test.cc"],
     deps = [
+        ":utility_test_protos_cc_proto",
         "//source/common/config:api_version_lib",
         "//source/common/protobuf:utility_lib",
         "//test/common/stats:stat_test_utility_lib",
@@ -35,6 +50,8 @@ envoy_cc_test(
         "//test/proto:sensitive_proto_cc_proto",
         "//test/test_common:environment_lib",
         "//test/test_common:logging_lib",
+        "//test/test_common:status_utility_lib",
+        "//test/test_common:test_runtime_lib",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/api/v2:pkg_cc_proto",
         "@envoy_api//envoy/api/v2/core:pkg_cc_proto",
@@ -42,15 +59,10 @@ envoy_cc_test(
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/health_checker/redis/v2:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/clusters/dynamic_forward_proxy/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/health_checkers/redis/v3:pkg_cc_proto",
         "@envoy_api//envoy/type/v3:pkg_cc_proto",
-    ],
-)
-
-envoy_cc_test(
-    name = "type_util_test",
-    srcs = ["type_util_test.cc"],
-    deps = [
-        "//source/common/protobuf:type_util_lib",
     ],
 )
 

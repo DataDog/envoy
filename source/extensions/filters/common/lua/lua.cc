@@ -1,12 +1,12 @@
-#include "extensions/filters/common/lua/lua.h"
+#include "source/extensions/filters/common/lua/lua.h"
 
 #include <memory>
 
 #include "envoy/common/exception.h"
 
-#include "common/common/assert.h"
-#include "common/common/lock_guard.h"
-#include "common/common/thread.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/lock_guard.h"
+#include "source/common/common/thread.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -44,6 +44,9 @@ void Coroutine::resume(int num_args, const std::function<void()>& yield_callback
   } else {
     state_ = State::Finished;
     const char* error = lua_tostring(coroutine_state_.get(), -1);
+    if (!error) {
+      error = "unspecified lua error";
+    }
     throw LuaException(error);
   }
 }
@@ -52,7 +55,7 @@ ThreadLocalState::ThreadLocalState(const std::string& code, ThreadLocal::SlotAll
     : tls_slot_(ThreadLocal::TypedSlot<LuaThreadLocal>::makeUnique(tls)) {
 
   // First verify that the supplied code can be parsed.
-  CSmartPtr<lua_State, lua_close> state(lua_open());
+  CSmartPtr<lua_State, lua_close> state(luaL_newstate());
   RELEASE_ASSERT(state.get() != nullptr, "unable to create new Lua state object");
   luaL_openlibs(state.get());
 
@@ -70,10 +73,14 @@ int ThreadLocalState::getGlobalRef(uint64_t slot) {
   return tls.global_slots_[slot];
 }
 
-uint64_t ThreadLocalState::registerGlobal(const std::string& global) {
-  tls_slot_->runOnAllThreads([global](OptRef<LuaThreadLocal> tls) {
+uint64_t ThreadLocalState::registerGlobal(const std::string& global,
+                                          const InitializerList& initializers) {
+  tls_slot_->runOnAllThreads([global, initializers](OptRef<LuaThreadLocal> tls) {
     lua_getglobal(tls->state_.get(), global.c_str());
     if (lua_isfunction(tls->state_.get(), -1)) {
+      for (const auto& initialize : initializers) {
+        initialize(tls->state_.get());
+      }
       tls->global_slots_.push_back(luaL_ref(tls->state_.get(), LUA_REGISTRYINDEX));
     } else {
       ENVOY_LOG(debug, "definition for '{}' not found in script", global);
@@ -90,7 +97,9 @@ CoroutinePtr ThreadLocalState::createCoroutine() {
   return std::make_unique<Coroutine>(std::make_pair(lua_newthread(state), state));
 }
 
-ThreadLocalState::LuaThreadLocal::LuaThreadLocal(const std::string& code) : state_(lua_open()) {
+ThreadLocalState::LuaThreadLocal::LuaThreadLocal(const std::string& code)
+    : state_(luaL_newstate()) {
+
   RELEASE_ASSERT(state_.get() != nullptr, "unable to create new Lua state object");
   luaL_openlibs(state_.get());
   int rc = luaL_dostring(state_.get(), code.c_str());

@@ -6,7 +6,7 @@
 #include "envoy/server/admin.h"
 #include "envoy/server/instance.h"
 
-#include "server/admin/handler_ctx.h"
+#include "source/server/admin/handler_ctx.h"
 
 #include "absl/strings/string_view.h"
 
@@ -18,8 +18,7 @@ class ClustersHandler : public HandlerContextBase {
 public:
   ClustersHandler(Server::Instance& server);
 
-  Http::Code handlerClusters(absl::string_view path_and_query,
-                             Http::ResponseHeaderMap& response_headers, Buffer::Instance& response,
+  Http::Code handlerClusters(Http::ResponseHeaderMap& response_headers, Buffer::Instance& response,
                              AdminStream&);
 
 private:

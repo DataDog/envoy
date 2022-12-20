@@ -1,13 +1,12 @@
-#include "server/admin/clusters_handler.h"
+#include "source/server/admin/clusters_handler.h"
 
 #include "envoy/admin/v3/clusters.pb.h"
 
-#include "common/http/headers.h"
-#include "common/http/utility.h"
-#include "common/network/utility.h"
-#include "common/upstream/host_utility.h"
-
-#include "server/admin/utils.h"
+#include "source/common/http/headers.h"
+#include "source/common/http/utility.h"
+#include "source/common/network/utility.h"
+#include "source/common/upstream/host_utility.h"
+#include "source/server/admin/utils.h"
 
 namespace Envoy {
 namespace Server {
@@ -43,11 +42,9 @@ void addCircuitBreakerSettingsAsJson(const envoy::config::core::v3::RoutingPrior
 
 ClustersHandler::ClustersHandler(Server::Instance& server) : HandlerContextBase(server) {}
 
-Http::Code ClustersHandler::handlerClusters(absl::string_view url,
-                                            Http::ResponseHeaderMap& response_headers,
-                                            Buffer::Instance& response, AdminStream&) {
-  Http::Utility::QueryParams query_params = Http::Utility::parseAndDecodeQueryString(url);
-  const auto format_value = Utility::formatParam(query_params);
+Http::Code ClustersHandler::handlerClusters(Http::ResponseHeaderMap& response_headers,
+                                            Buffer::Instance& response, AdminStream& admin_stream) {
+  const auto format_value = Utility::formatParam(admin_stream.queryParams());
 
   if (format_value.has_value() && format_value.value() == "json") {
     writeClustersAsJson(response);
@@ -94,18 +91,34 @@ void setHealthFlag(Upstream::Host::HealthFlag flag, const Upstream::Host& host,
     health_status.set_pending_active_hc(
         host.healthFlagGet(Upstream::Host::HealthFlag::PENDING_ACTIVE_HC));
     break;
+  case Upstream::Host::HealthFlag::EXCLUDED_VIA_IMMEDIATE_HC_FAIL:
+    health_status.set_excluded_via_immediate_hc_fail(
+        host.healthFlagGet(Upstream::Host::HealthFlag::EXCLUDED_VIA_IMMEDIATE_HC_FAIL));
+    break;
+  case Upstream::Host::HealthFlag::ACTIVE_HC_TIMEOUT:
+    health_status.set_active_hc_timeout(
+        host.healthFlagGet(Upstream::Host::HealthFlag::ACTIVE_HC_TIMEOUT));
+    break;
   }
 }
 
 // TODO(efimki): Add support of text readouts stats.
 void ClustersHandler::writeClustersAsJson(Buffer::Instance& response) {
   envoy::admin::v3::Clusters clusters;
-  for (const auto& [name, cluster_ref] : server_.clusterManager().clusters()) {
+  // TODO(mattklein123): Add ability to see warming clusters in admin output.
+  auto all_clusters = server_.clusterManager().clusters();
+  for (const auto& [name, cluster_ref] : all_clusters.active_clusters_) {
+    UNREFERENCED_PARAMETER(name);
     const Upstream::Cluster& cluster = cluster_ref.get();
     Upstream::ClusterInfoConstSharedPtr cluster_info = cluster.info();
 
     envoy::admin::v3::ClusterStatus& cluster_status = *clusters.add_cluster_statuses();
     cluster_status.set_name(cluster_info->name());
+    cluster_status.set_observability_name(cluster_info->observabilityName());
+    const auto& eds_service_name = cluster_info->edsServiceName();
+    if (eds_service_name.has_value()) {
+      cluster_status.set_eds_service_name(*eds_service_name);
+    }
 
     addCircuitBreakerSettingsAsJson(
         envoy::config::core::v3::RoutingPriority::DEFAULT,
@@ -179,14 +192,19 @@ void ClustersHandler::writeClustersAsJson(Buffer::Instance& response) {
       }
     }
   }
-  response.add(MessageUtil::getJsonStringFromMessage(clusters, true)); // pretty-print
+  response.add(MessageUtil::getJsonStringFromMessageOrError(clusters, true)); // pretty-print
 }
 
 // TODO(efimki): Add support of text readouts stats.
 void ClustersHandler::writeClustersAsText(Buffer::Instance& response) {
-  for (const auto& [name, cluster_ref] : server_.clusterManager().clusters()) {
+  // TODO(mattklein123): Add ability to see warming clusters in admin output.
+  auto all_clusters = server_.clusterManager().clusters();
+  for (const auto& [name, cluster_ref] : all_clusters.active_clusters_) {
+    UNREFERENCED_PARAMETER(name);
     const Upstream::Cluster& cluster = cluster_ref.get();
     const std::string& cluster_name = cluster.info()->name();
+    response.add(fmt::format("{}::observability_name::{}\n", cluster_name,
+                             cluster.info()->observabilityName()));
     addOutlierInfo(cluster_name, cluster.outlierDetector(), response);
 
     addCircuitBreakerSettingsAsText(
@@ -198,6 +216,10 @@ void ClustersHandler::writeClustersAsText(Buffer::Instance& response) {
 
     response.add(
         fmt::format("{}::added_via_api::{}\n", cluster_name, cluster.info()->addedViaApi()));
+    const auto& eds_service_name = cluster.info()->edsServiceName();
+    if (eds_service_name.has_value()) {
+      response.add(fmt::format("{}::eds_service_name::{}\n", cluster_name, *eds_service_name));
+    }
     for (auto& host_set : cluster.prioritySet().hostSetsPerPriority()) {
       for (auto& host : host_set->hosts()) {
         const std::string& host_address = host->address()->asString();

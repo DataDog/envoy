@@ -1,4 +1,4 @@
-#include "common/router/metadatamatchcriteria_impl.h"
+#include "source/common/router/metadatamatchcriteria_impl.h"
 
 namespace Envoy {
 namespace Router {
@@ -49,9 +49,6 @@ MetadataMatchCriteriaImpl::filterMatchCriteria(const std::set<std::string>& name
     if (names.count(it->name()) == 1) {
       v.emplace_back(it);
     }
-  }
-  if (v.empty()) {
-    return nullptr;
   }
   return MetadataMatchCriteriaImplConstPtr(new MetadataMatchCriteriaImpl(v));
 };

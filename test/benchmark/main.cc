@@ -2,8 +2,8 @@
 // This is an Envoy driver for benchmarks.
 #include "test/benchmark/main.h"
 
-#include "common/common/logger.h"
-#include "common/common/thread.h"
+#include "source/common/common/logger.h"
+#include "source/common/common/thread.h"
 
 #include "test/test_common/environment.h"
 #include "test/test_common/test_runtime.h"
@@ -21,6 +21,27 @@ static bool skip_expensive_benchmarks = false;
 // separated by --.
 // TODO(pgenera): convert this to abseil/flags/ when benchmark also adopts abseil.
 int main(int argc, char** argv) {
+
+  bool contains_help_flag = false;
+
+  // Checking if any of the command-line arguments contains `--help`
+  for (int i = 1; i < argc; ++i) {
+    if (strcmp(argv[i], "--help") == 0) {
+      contains_help_flag = true;
+      break;
+    }
+  }
+
+  // if the `--help` flag isn't considered separately, it runs "benchmark --help"
+  // (Google Benchmark Help) and the help output doesn't contains details about
+  // custom defined flags like `--skip_expensive_benchmarks`, `--runtime_feature`, etc
+  if (!contains_help_flag) {
+    // Passing the arguments of the program to Google Benchmark.
+    // That way Google benchmark options would also be supported, along with the
+    // custom defined custom flags
+    ::benchmark::Initialize(&argc, argv);
+  }
+
   TestEnvironment::initializeTestMain(argv[0]);
 
   // Suppressing non-error messages in benchmark tests. This hides warning
@@ -43,26 +64,30 @@ int main(int argc, char** argv) {
     cmd.parse(argc, argv);
   } catch (const TCLAP::ExitException& e) {
     // parse() throws an ExitException with status 0 after printing the output
-    // for --help and --version.
+    // for --help and --version. But first pass the args to
+    // benchmark::Initialize to give it a chance to print the benchmark library
+    // help.
+
+    if (contains_help_flag) {
+      ::benchmark::Initialize(&argc, argv);
+    }
+
     return 0;
   }
 
   // Reduce logs so benchmark output is readable.
-  Thread::MutexBasicLockable lock;
-  Logger::Context logging_context{spdlog::level::warn, Logger::Context::getFancyLogFormat(), lock,
-                                  false};
+  Envoy::Thread::MutexBasicLockable lock;
+  Logger::Context logging_context{spdlog::level::warn, Logger::Context::getFineGrainLogFormat(),
+                                  lock, false};
 
   skip_expensive_benchmarks = skip_switch.getValue();
 
+  TestScopedRuntime runtime;
   // Initialize scoped_runtime if a runtime_feature argument is present. This
   // allows benchmarks to use their own scoped_runtime in case no runtime flag is
   // passed as an argument.
-  std::unique_ptr<TestScopedRuntime> scoped_runtime = nullptr;
   const auto& runtime_features_args = runtime_features.getValue();
   for (const absl::string_view runtime_feature_arg : runtime_features_args) {
-    if (scoped_runtime == nullptr) {
-      scoped_runtime = std::make_unique<TestScopedRuntime>();
-    }
     // Make sure the argument contains a single ":" character.
     const std::vector<std::string> runtime_feature_split = absl::StrSplit(runtime_feature_arg, ':');
     if (runtime_feature_split.size() != 2) {
@@ -74,10 +99,8 @@ int main(int argc, char** argv) {
     }
     const auto feature_name = runtime_feature_split[0];
     const auto feature_val = runtime_feature_split[1];
-    Runtime::LoaderSingleton::getExisting()->mergeValues({{feature_name, feature_val}});
+    runtime.mergeValues({{feature_name, feature_val}});
   }
-
-  ::benchmark::Initialize(&argc, argv);
 
   if (skip_expensive_benchmarks) {
     ENVOY_LOG_MISC(

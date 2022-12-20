@@ -16,7 +16,7 @@ envoy_package()
 envoy_extension_cc_test(
     name = "redis_cluster_test",
     srcs = ["redis_cluster_test.cc"],
-    extension_name = "envoy.clusters.redis",
+    extension_names = ["envoy.clusters.redis"],
     deps = [
         "//source/common/event:dispatcher_lib",
         "//source/common/network:utility_lib",
@@ -45,8 +45,8 @@ envoy_extension_cc_test(
         "//test/mocks/upstream:health_check_event_logger_mocks",
         "//test/mocks/upstream:health_checker_mocks",
         "//test/test_common:utility_lib",
-        "@envoy_api//envoy/config/cluster/redis:pkg_cc_proto",
         "@envoy_api//envoy/config/cluster/v3:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/clusters/redis/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/redis_proxy/v3:pkg_cc_proto",
     ],
 )
@@ -54,9 +54,9 @@ envoy_extension_cc_test(
 envoy_extension_cc_test(
     name = "redis_cluster_lb_test",
     srcs = ["redis_cluster_lb_test.cc"],
-    extension_name = "envoy.clusters.redis",
+    extension_names = ["envoy.clusters.redis"],
     deps = [
-        "//include/envoy/upstream:cluster_manager_interface",
+        "//envoy/upstream:cluster_manager_interface",
         "//source/common/event:dispatcher_lib",
         "//source/common/network:utility_lib",
         "//source/common/upstream:cluster_factory_lib",
@@ -83,6 +83,7 @@ envoy_extension_cc_test(
         "//test/mocks/ssl:ssl_mocks",
         "//test/mocks/thread_local:thread_local_mocks",
         "//test/mocks/upstream:cluster_info_mocks",
+        "//test/test_common:simulated_time_system_lib",
         "//test/test_common:utility_lib",
     ],
 )
@@ -91,11 +92,15 @@ envoy_extension_cc_test(
     name = "redis_cluster_integration_test",
     size = "small",
     srcs = ["redis_cluster_integration_test.cc"],
-    extension_name = "envoy.clusters.redis",
+    extension_names = ["envoy.clusters.redis"],
+    # This test takes a while to run specially under tsan.
+    # Shard it to avoid test timeout.
+    shard_count = 2,
     deps = [
         "//source/extensions/clusters/redis:redis_cluster",
         "//source/extensions/clusters/redis:redis_cluster_lb",
         "//source/extensions/filters/network/redis_proxy:config",
+        "//test/integration:ads_integration_lib",
         "//test/integration:integration_lib",
         "@envoy_api//envoy/config/bootstrap/v3:pkg_cc_proto",
     ],
@@ -106,11 +111,11 @@ envoy_cc_mock(
     srcs = ["mocks.cc"],
     hdrs = ["mocks.h"],
     deps = [
-        "//include/envoy/upstream:upstream_interface",
+        "//envoy/upstream:upstream_interface",
         "//source/common/upstream:cluster_factory_lib",
         "//source/common/upstream:upstream_lib",
         "//source/extensions/clusters/redis:redis_cluster",
-        "@envoy_api//envoy/config/cluster/redis:pkg_cc_proto",
+        "@envoy_api//envoy/extensions/clusters/redis/v3:pkg_cc_proto",
         "@envoy_api//envoy/extensions/filters/network/redis_proxy/v3:pkg_cc_proto",
     ],
 )

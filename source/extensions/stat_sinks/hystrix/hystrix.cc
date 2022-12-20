@@ -1,4 +1,4 @@
-#include "extensions/stat_sinks/hystrix/hystrix.h"
+#include "source/extensions/stat_sinks/hystrix/hystrix.h"
 
 #include <chrono>
 #include <ctime>
@@ -7,11 +7,11 @@
 
 #include "envoy/stats/scope.h"
 
-#include "common/buffer/buffer_impl.h"
-#include "common/common/logger.h"
-#include "common/config/well_known_names.h"
-#include "common/http/headers.h"
-#include "common/stats/utility.h"
+#include "source/common/buffer/buffer_impl.h"
+#include "source/common/common/logger.h"
+#include "source/common/config/well_known_names.h"
+#include "source/common/http/headers.h"
+#include "source/common/stats/utility.h"
 
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
@@ -90,7 +90,7 @@ uint64_t HystrixSink::getRollingValue(RollingWindow rolling_window) {
 
 void HystrixSink::updateRollingWindowMap(const Upstream::ClusterInfo& cluster_info,
                                          ClusterStatsCache& cluster_stats_cache) {
-  Upstream::ClusterStats& cluster_stats = cluster_info.stats();
+  Upstream::ClusterTrafficStats& cluster_stats = cluster_info.trafficStats();
   Stats::Scope& cluster_stats_scope = cluster_info.statsScope();
 
   // Combining timeouts+retries - retries are counted  as separate requests
@@ -283,15 +283,16 @@ HystrixSink::HystrixSink(Server::Configuration::ServerFactoryContext& server,
       upstream_rq_2xx_(stat_name_pool_.add("upstream_rq_2xx")),
       upstream_rq_4xx_(stat_name_pool_.add("upstream_rq_4xx")),
       upstream_rq_5xx_(stat_name_pool_.add("upstream_rq_5xx")) {
-  Server::Admin& admin = server_.admin();
+  if (!server.admin().has_value()) {
+    return;
+  }
   ENVOY_LOG(debug,
             "adding hystrix_event_stream endpoint to enable connection to hystrix dashboard");
-  admin.addHandler("/hystrix_event_stream", "send hystrix event stream",
-                   MAKE_ADMIN_HANDLER(handlerHystrixEventStream), false, false);
+  server.admin()->addHandler("/hystrix_event_stream", "send hystrix event stream",
+                             MAKE_ADMIN_HANDLER(handlerHystrixEventStream), false, false);
 }
 
-Http::Code HystrixSink::handlerHystrixEventStream(absl::string_view,
-                                                  Http::ResponseHeaderMap& response_headers,
+Http::Code HystrixSink::handlerHystrixEventStream(Http::ResponseHeaderMap& response_headers,
                                                   Buffer::Instance&,
                                                   Server::AdminStream& admin_stream) {
 
@@ -319,7 +320,10 @@ Http::Code HystrixSink::handlerHystrixEventStream(absl::string_view,
   // Separated out just so it's easier to understand
   auto on_destroy_callback = [this, &stream_decoder_filter_callbacks]() {
     ENVOY_LOG(debug, "stopped sending data to hystrix dashboard on port {}",
-              stream_decoder_filter_callbacks.connection()->remoteAddress()->asString());
+              stream_decoder_filter_callbacks.connection()
+                  ->connectionInfoProvider()
+                  .remoteAddress()
+                  ->asString());
 
     // Unregister the callbacks from the sink so data is no longer encoded through them.
     unregisterConnection(&stream_decoder_filter_callbacks);
@@ -329,7 +333,10 @@ Http::Code HystrixSink::handlerHystrixEventStream(absl::string_view,
   admin_stream.addOnDestroyCallback(std::move(on_destroy_callback));
 
   ENVOY_LOG(debug, "started sending data to hystrix dashboard on port {}",
-            stream_decoder_filter_callbacks.connection()->remoteAddress()->asString());
+            stream_decoder_filter_callbacks.connection()
+                ->connectionInfoProvider()
+                .remoteAddress()
+                ->asString());
   return Http::Code::OK;
 }
 
@@ -339,7 +346,7 @@ void HystrixSink::flush(Stats::MetricSnapshot& snapshot) {
   }
   incCounter();
   std::stringstream ss;
-  Upstream::ClusterManager::ClusterInfoMap clusters = server_.clusterManager().clusters();
+  Upstream::ClusterManager::ClusterInfoMaps all_clusters = server_.clusterManager().clusters();
 
   // Save a map of the relevant histograms per cluster in a convenient format.
   absl::node_hash_map<std::string, QuantileLatencyMap> time_histograms;
@@ -370,7 +377,7 @@ void HystrixSink::flush(Stats::MetricSnapshot& snapshot) {
     }
   }
 
-  for (auto& cluster : clusters) {
+  for (auto& cluster : all_clusters.active_clusters_) {
     Upstream::ClusterInfoConstSharedPtr cluster_info = cluster.second.get().info();
 
     std::unique_ptr<ClusterStatsCache>& cluster_stats_cache_ptr =
@@ -389,7 +396,7 @@ void HystrixSink::flush(Stats::MetricSnapshot& snapshot) {
         cluster_info->statsScope()
             .gaugeFromStatName(membership_total_, Stats::Gauge::ImportMode::NeverImport)
             .value(),
-        server_.statsFlushInterval(), time_histograms[cluster_info->name()], ss);
+        server_.statsConfig().flushInterval(), time_histograms[cluster_info->name()], ss);
   }
 
   Buffer::OwnedImpl data;
@@ -407,9 +414,9 @@ void HystrixSink::flush(Stats::MetricSnapshot& snapshot) {
   }
 
   // check if any clusters were removed, and remove from cache
-  if (clusters.size() < cluster_stats_cache_map_.size()) {
+  if (all_clusters.active_clusters_.size() < cluster_stats_cache_map_.size()) {
     for (auto it = cluster_stats_cache_map_.begin(); it != cluster_stats_cache_map_.end();) {
-      if (clusters.find(it->first) == clusters.end()) {
+      if (all_clusters.active_clusters_.find(it->first) == all_clusters.active_clusters_.end()) {
         auto next_it = std::next(it);
         cluster_stats_cache_map_.erase(it);
         it = next_it;

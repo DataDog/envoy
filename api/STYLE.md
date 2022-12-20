@@ -25,15 +25,25 @@ In addition, the following conventions should be followed:
 
 * Use [wrapped scalar
   types](https://github.com/google/protobuf/blob/master/src/google/protobuf/wrappers.proto)
-  where there is a real need for the field to have a default value that does not
-  match the proto3 defaults (0/false/""). This should not be done for fields
-  where the proto3 defaults make sense. All things being equal, pick appropriate
-  logic, e.g. enable vs. disable for a `bool` field, such that the proto3
-  defaults work, but only where this doesn't result in API gymnastics.
+  if there is any potential need for a field to have a default value that does not
+  match the proto3 defaults (0/false/""). For example, new features whose
+  default value may change in the future or security mitigations that should be
+  default safe in the future but are temporarily not enabled.
 
 * Use a `[#not-implemented-hide:]` `protodoc` annotation in comments for fields that lack Envoy
   implementation. These indicate that the entity is not implemented in Envoy and the entity
   should be hidden from the Envoy documentation.
+
+* For extensions that are a work-in-progress or the config proto documentation is hidden with
+  `[#not-implemented-hide:]`, set its `status` field to `wip` in `extensions_metadata.yaml`.
+
+* Use a `(xds.annotations.v3.file_status).work_in_progress`,
+  `(xds.annotations.v3.message_status).work_in_progress`, or
+  `(xds.annotations.v3.field_status).work_in_progress` option annotation for files,
+  messages, or fields, respectively, that are considered work in progress and are not subject to the
+  threat model or the breaking change policy. This is similar to the work-in-progress/alpha tagging
+  of extensions described below, but allows tagging protos that are used as part of the core API
+  as work in progress without having to break them into their own file.
 
 * Always use plural field names for `repeated` fields, such as `filters`.
 
@@ -81,6 +91,12 @@ In addition, the following conventions should be followed:
   pattern forces developers to explicitly choose the correct enum value for
   their use case, and avoid misunderstanding of the default behavior.
 
+* For time-related fields, prefer using the well-known types `google.protobuf.Duration` or
+  `google.protobuf.Timestamp` instead of raw integers for seconds.
+
+* If a field is going to contain raw bytes rather than a human-readable string, the field should
+  be of type `bytes` instead of `string`.
+
 * Proto fields should be sorted logically, not by field number.
 
 ## Package organization
@@ -102,12 +118,8 @@ Extensions must currently be added as v3 APIs following the [package
 organization](#package-organization) above.
 To add an extension config to the API, the steps below should be followed:
 
-1. If this is still WiP and subject to breaking changes, use `vNalpha` instead of `vN` in steps
-   below. Refer to the [Cache filter config](envoy/extensions/filter/http/cache/v3alpha/cache.proto)
-   as an example of `v3alpha`, and the
-   [Buffer filter config](envoy/extensions/filter/http/buffer/v3/buffer.proto) as an example of `v3`.
-1. Place the v3 extension configuration `.proto` in `api/envoy/extensions`, e.g.
-   `api/envoy/extensions/filter/http/foobar/v3/foobar.proto` together with an initial BUILD file:
+1. Place the v3 extension configuration `.proto` in `api/envoy/extensions` or `api/contrib/envoy/extensions`, e.g.
+   `api/envoy/extensions/filters/http/foobar/v3/foobar.proto` together with an initial BUILD file:
    ```bazel
    load("@envoy_api//bazel:api_build_system.bzl", "api_proto_package")
 
@@ -117,18 +129,43 @@ To add an extension config to the API, the steps below should be followed:
        deps = ["@com_github_cncf_udpa//udpa/annotations:pkg"],
    )
    ```
-1. Add to the v3 extension config proto `import "udpa/annotations/migrate.proto";`
-   and `import "udpa/annotations/status.proto";`
-1. If this is still WiP and subject to breaking changes, set
-   `option (udpa.annotations.file_status).work_in_progress = true;`.
-1. Add to the v3 extension config proto a file level
-   `option (udpa.annotations.file_status).package_version_status = ACTIVE;`.
-   This is required to automatically include the config proto in [api/versioning/BUILD](versioning/BUILD).
-1. Add a reference to the v3 extension config in (1) in [api/versioning/BUILD](versioning/BUILD) under `active_protos`.
-1. Run `./tools/proto_format/proto_format.sh fix`. This should regenerate the `BUILD` file,
-   reformat `foobar.proto` as needed and also generate the v4alpha extension config (if needed),
-   together with shadow API protos.
-1. `git add api/ generated_api_shadow/` to add any new files to your Git index.
+1. If this is still WiP and subject to breaking changes, please tag it
+   `option (xds.annotations.v3.file_status).work_in_progress = true;` and
+   optionally hide it from the docs (`[#not-implemented-hide:]`).
+1. Make sure your proto imports the v3 extension config proto (`import "udpa/annotations/status.proto";`)
+1. Make sure your proto is tracked as ready to be used
+   (`option (udpa.annotations.file_status).package_version_status = ACTIVE;`).
+   This is required to automatically include the config proto in [api/versioning/BUILD](versioning/BUILD) under `active_protos`.
+1. Add a reference to the v3 extension config in [api/BUILD](BUILD) under `v3_protos`.
+1. Update [source/extensions/extensions_metadata.yaml](../source/extensions/extensions_metadata.yaml) or [contrib/extensions_metadata.yaml](../contrib/extensions_metadata.yaml)
+   with the category, [security posture, and status](../EXTENSION_POLICY.md#extension-stability-and-security-posture).
+   * Any extension category added to `extensions_metadata.yaml` should be annotated in precisely one proto file, associated with a field of a proto message. e.g.
+     ```proto
+     message SomeMessage {
+       // An ordered list of http filters
+       // [#extension-category: envoy.http.filters]
+       repeated core.v3.TypedExtensionConfig http_filter_extensions = 1;
+     }
+     ```
+   * Each extension added to `extensions_metadata.yaml` should have precisely one proto file annotated with the extension name. e.g.
+     ```proto
+     // [#protodoc-title: Your New Filter]
+     // [#extension: envoy.http.filters.your_new_filter]
+
+     // YourFilterConfig is the configuration for a YourFilter (write real documentation here).
+     message YourFilterConfig {
+     }
+     ```
+1. If you introduce a new extension category, you'll also need to add its name
+   under `categories` in: [tools/extensions/extensions_schema.yaml](../tools/extensions/extensions_schema.yaml).
+1. Update
+   [source/extensions/extensions_build_config.bzl](../source/extensions/extensions_build_config.bzl) or [contrib/contrib_build_config.bzl](../contrib/contrib_build_config.bzl)
+   to include the new extension.
+1. If the extension is not hidden, find or create a docs file with a toctree
+   and to reference your proto to make sure users can navigate to it from the API docs
+   (and to not break the docs build), like [docs/root/api-v3/admin/admin.rst](../docs/root/api-v3/admin/admin.rst).
+1. Run `./tools/proto_format/proto_format.sh fix`. **Before running the script**, you will need to **commit your local changes**. By adding the commit, the tool will recognize the change, and will regenerate the `BUILD` file and reformat `foobar.proto` as needed. If you have not followed any of the above steps correctly `proto_format.sh` may remove some of the files that you added. If that is the case you can revert to the committed state, and try again once any issues are resolved.
+1. See the [key-value-store PR](https://github.com/envoyproxy/envoy/pull/17745/files) for an example of adding a new extension point to common.
 
 ## API annotations
 
@@ -147,7 +184,7 @@ metadata. We describe these annotations below by category.
   the field will be promoted to a given `oneof` in the next API major version.
 * `[(udpa.annotations.sensitive) = true]` to denote sensitive fields that
   should be redacted in output such as logging or configuration dumps.
-* [PGV annotations](https://github.com/envoyproxy/protoc-gen-validate) to denote field
+* [PGV annotations](https://github.com/bufbuild/protoc-gen-validate) to denote field
   value constraints.
 
 ### Enum value level
@@ -167,5 +204,63 @@ metadata. We describe these annotations below by category.
 * `option (udpa.annotations.file_migrate).move_to_package = "<package name>";`
   to denote that in the next major version of the API, the file will be moved to
   the given package. This is consumed by `protoxform`.
-* `option (udpa.annotations.file_status).work_in_progress = true;` to denote a
+* `option (xds.annotations.v3.file_status).work_in_progress = true;` to denote a
   file that is still work-in-progress and subject to breaking changes.
+
+## Principles
+
+The following principles should be adhered to when extending or modifying the
+xDS APIs:
+
+* The xDS APIs have a logical distinction between transport and data model:
+  - The xDS transport protocol describes the network transport on which xDS
+    configuration resources are delivered to clients. A versioned gRPC streaming
+    protocol with support for ACK/NACK is provided by xDS; this is known as the
+    xDS transport protocol (xDS-TP). xDS configuration resources can also be
+    delivered on other transports, e.g. HTTP or filesystem, with some
+    limitations (e.g. no version feedback).
+  - The xDS data model describes the xDS configuration resources themselves,
+    e.g. listeners, route configurations, clusters, endpoints, secrets.
+
+* The xDS APIs are directionally client and server neutral. While many aspects
+  of the APIs reflect the history of their origin as Envoy's control plane APIs,
+  API decisions going forward should reflect the principle of client neutrality.
+
+* The xDS APIs are expressed canonically as [Proto3](https://developers.google.com/protocol-buffers/docs/proto3).
+  Both JSON and YAML are also supported formats, with the standard JSON-proto3
+  conversion used during client configuration ingestion.
+
+* xDS APIs are eventual consistency first. For example, if RDS references a
+  cluster that has not yet been supplied by CDS, it should be silently ignored
+  and traffic not forwarded until the CDS update occurs. Stronger consistency
+  guarantees are possible if the management server is able to sequence the xDS
+  APIs carefully (for example by using the ADS API below). By following the
+  `[CDS, EDS, LDS, RDS]` sequence for all pertinent resources, it will be
+  possible to avoid traffic outages during configuration update.
+
+* The API is primarily intended for machine generation and consumption. It is
+  expected that the management server is responsible for mapping higher level
+  configuration concepts to API responses. Similarly, static configuration
+  fragments may be generated by templating tools, etc. With that consideration,
+  we also aim to have API artifacts readable by humans for debugging and
+  understanding applied configuration. This implies that APIs do not have to
+  have ergonomics as the main driver, but should still be reasonable to read by
+  humans. The APIs and tools used to generate xDS configuration are beyond the
+  scope of the definitions in this repository.
+
+* All supported transports (xDS-TP, HTTP, filesystem) support basic singleton xDS
+  subscription services CDS/EDS/LDS/RDS/SDS. Advanced APIs such as HDS, ADS and
+  EDS multi-dimensional LB are xDS-TP only. This avoids having to map
+  complicated bidirectional stream semantics onto REST, etc..
+
+* Versioning follows the scheme described [here](API_VERSIONING.md). A key
+  principle that we target is that API consumers should not be exposed to
+  breaking changes where there is no substantial gain in functionality,
+  performance, security or implementation simplification. We will tolerate
+  technical debt in the API itself, e.g. in the form of vestigial deprecated
+  fields or reduced ergonomics (such as not using `oneof` when we would prefer
+  to), in order to meet this principle.
+
+* Namespaces for extensions, metadata, etc. use a reverse DNS naming scheme,
+  e.g. `com.google.widget`, `com.lyft.widget`. Client built-ins may be prefixed
+  with client name, e.g. `envoy.foo`, `grpc.bar`.

@@ -1,3 +1,5 @@
+.. _arch_overview_clusters:
+
 Upstream clusters
 =================
 
@@ -6,6 +8,7 @@ Upstream clusters
 
   cluster_manager
   service_discovery
+  dns_resolution
   health_checking
   connection_pooling
   load_balancing/load_balancing

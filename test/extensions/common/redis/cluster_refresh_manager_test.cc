@@ -1,12 +1,10 @@
 #include <atomic>
 #include <chrono>
 
-#include "common/common/lock_guard.h"
-#include "common/common/thread.h"
-
-#include "exe/platform_impl.h"
-
-#include "extensions/common/redis/cluster_refresh_manager_impl.h"
+#include "source/common/common/lock_guard.h"
+#include "source/common/common/thread.h"
+#include "source/exe/platform_impl.h"
+#include "source/extensions/common/redis/cluster_refresh_manager_impl.h"
 
 #include "test/extensions/filters/network/common/redis/mocks.h"
 #include "test/extensions/filters/network/redis_proxy/mocks.h"
@@ -33,8 +31,8 @@ public:
       : cluster_name_("fake_cluster"), refresh_manager_(std::make_shared<ClusterRefreshManagerImpl>(
                                            dispatcher_, cm_, time_system_)) {
     time_system_.setMonotonicTime(std::chrono::seconds(1));
-    map_.emplace("fake_cluster", mock_cluster_);
-    ON_CALL(cm_, clusters()).WillByDefault(Return(map_));
+    cluster_maps_.active_clusters_.emplace("fake_cluster", mock_cluster_);
+    ON_CALL(cm_, clusters()).WillByDefault(Return(cluster_maps_));
   }
   ~ClusterRefreshManagerTest() override = default;
 
@@ -104,7 +102,7 @@ public:
   const std::string cluster_name_;
   NiceMock<Event::MockDispatcher> dispatcher_;
   NiceMock<Upstream::MockClusterManager> cm_;
-  Upstream::ClusterManager::ClusterInfoMap map_;
+  Upstream::ClusterManager::ClusterInfoMaps cluster_maps_;
   Upstream::MockClusterMockPrioritySet mock_cluster_;
   Event::SimulatedTimeSystem time_system_;
   std::shared_ptr<ClusterRefreshManagerImpl> refresh_manager_;

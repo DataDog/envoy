@@ -11,19 +11,16 @@
 #include "envoy/stats/stats_macros.h"
 #include "envoy/upstream/upstream.h"
 
-#include "common/common/backoff_strategy.h"
-#include "common/common/logger.h"
-#include "common/common/macros.h"
-#include "common/config/utility.h"
-#include "common/grpc/async_client_impl.h"
-#include "common/network/resolver_impl.h"
-#include "common/upstream/health_checker_impl.h"
-#include "common/upstream/locality_endpoint.h"
-#include "common/upstream/upstream_impl.h"
-
-#include "server/transport_socket_config_impl.h"
-
-#include "extensions/transport_sockets/well_known_names.h"
+#include "source/common/common/backoff_strategy.h"
+#include "source/common/common/logger.h"
+#include "source/common/common/macros.h"
+#include "source/common/config/utility.h"
+#include "source/common/grpc/async_client_impl.h"
+#include "source/common/network/resolver_impl.h"
+#include "source/common/upstream/health_checker_impl.h"
+#include "source/common/upstream/locality_endpoint.h"
+#include "source/common/upstream/upstream_impl.h"
+#include "source/server/transport_socket_config_impl.h"
 
 #include "absl/container/flat_hash_map.h"
 
@@ -50,14 +47,11 @@ public:
 class HdsCluster : public Cluster, Logger::Loggable<Logger::Id::upstream> {
 public:
   static ClusterSharedPtr create();
-  HdsCluster(Server::Admin& admin, Runtime::Loader& runtime,
+  HdsCluster(Server::Configuration::ServerFactoryContext& server_context,
              envoy::config::cluster::v3::Cluster cluster,
              const envoy::config::core::v3::BindConfig& bind_config, Stats::Store& stats,
              Ssl::ContextManager& ssl_context_manager, bool added_via_api,
-             ClusterInfoFactory& info_factory, ClusterManager& cm,
-             const LocalInfo::LocalInfo& local_info, Event::Dispatcher& dispatcher,
-             Singleton::Manager& singleton_manager, ThreadLocal::SlotAllocator& tls,
-             ProtobufMessage::ValidationVisitor& validation_visitor, Api::Api& api);
+             ClusterInfoFactory& info_factory, ThreadLocal::SlotAllocator& tls);
 
   // Upstream::Cluster
   InitializePhase initializePhase() const override { return InitializePhase::Primary; }
@@ -70,15 +64,10 @@ public:
   const Outlier::Detector* outlierDetector() const override { return outlier_detector_.get(); }
   void initialize(std::function<void()> callback) override;
   // Compare changes in the cluster proto, and update parts of the cluster as needed.
-  void update(Server::Admin& admin, envoy::config::cluster::v3::Cluster cluster,
-              ClusterInfoFactory& info_factory, ClusterManager& cm,
-              const LocalInfo::LocalInfo& local_info, Event::Dispatcher& dispatcher,
-              Singleton::Manager& singleton_manager, ThreadLocal::SlotAllocator& tls,
-              ProtobufMessage::ValidationVisitor& validation_visitor, Api::Api& api,
-              AccessLog::AccessLogManager& access_log_manager, Runtime::Loader& runtime);
+  void update(envoy::config::cluster::v3::Cluster cluster, ClusterInfoFactory& info_factory,
+              ThreadLocal::SlotAllocator& tls);
   // Creates healthcheckers and adds them to the list, then does initial start.
-  void initHealthchecks(AccessLog::AccessLogManager& access_log_manager, Runtime::Loader& runtime,
-                        Event::Dispatcher& dispatcher, Api::Api& api);
+  void initHealthchecks();
 
   std::vector<Upstream::HealthCheckerSharedPtr> healthCheckers() { return health_checkers_; };
   std::vector<HostSharedPtr> hosts() { return *hosts_; };
@@ -91,7 +80,7 @@ protected:
 private:
   std::function<void()> initialization_complete_callback_;
 
-  Runtime::Loader& runtime_;
+  Server::Configuration::ServerFactoryContext& server_context_;
   envoy::config::cluster::v3::Cluster cluster_;
   const envoy::config::core::v3::BindConfig& bind_config_;
   Stats::Store& stats_;
@@ -107,12 +96,10 @@ private:
   ClusterInfoConstSharedPtr info_;
   std::vector<Upstream::HealthCheckerSharedPtr> health_checkers_;
   HealthCheckerMap health_checkers_map_;
-  ProtobufMessage::ValidationVisitor& validation_visitor_;
+  TimeSource& time_source_;
 
   void updateHealthchecks(
-      const Protobuf::RepeatedPtrField<envoy::config::core::v3::HealthCheck>& health_checks,
-      AccessLog::AccessLogManager& access_log_manager, Runtime::Loader& runtime,
-      Event::Dispatcher& dispatcher, Api::Api& api);
+      const Protobuf::RepeatedPtrField<envoy::config::core::v3::HealthCheck>& health_checks);
   void
   updateHosts(const Protobuf::RepeatedPtrField<envoy::config::endpoint::v3::LocalityLbEndpoints>&
                   locality_endpoints,
@@ -147,14 +134,9 @@ struct HdsDelegateStats {
 class HdsDelegate : Grpc::AsyncStreamCallbacks<envoy::service::health::v3::HealthCheckSpecifier>,
                     Logger::Loggable<Logger::Id::upstream> {
 public:
-  HdsDelegate(Stats::Scope& scope, Grpc::RawAsyncClientPtr async_client,
-              envoy::config::core::v3::ApiVersion transport_api_version,
-              Event::Dispatcher& dispatcher, Runtime::Loader& runtime, Envoy::Stats::Store& stats,
-              Ssl::ContextManager& ssl_context_manager, ClusterInfoFactory& info_factory,
-              AccessLog::AccessLogManager& access_log_manager, ClusterManager& cm,
-              const LocalInfo::LocalInfo& local_info, Server::Admin& admin,
-              Singleton::Manager& singleton_manager, ThreadLocal::SlotAllocator& tls,
-              ProtobufMessage::ValidationVisitor& validation_visitor, Api::Api& api);
+  HdsDelegate(Server::Configuration::ServerFactoryContext& server_context, Stats::Scope& scope,
+              Grpc::RawAsyncClientPtr async_client, Envoy::Stats::Store& stats,
+              Ssl::ContextManager& ssl_context_manager, ClusterInfoFactory& info_factory);
 
   // Grpc::AsyncStreamCallbacks
   void onCreateInitialMetadata(Http::RequestHeaderMap& metadata) override;
@@ -187,19 +169,13 @@ private:
   Grpc::AsyncClient<envoy::service::health::v3::HealthCheckRequestOrEndpointHealthResponse,
                     envoy::service::health::v3::HealthCheckSpecifier>
       async_client_;
-  const envoy::config::core::v3::ApiVersion transport_api_version_;
   Grpc::AsyncStream<envoy::service::health::v3::HealthCheckRequestOrEndpointHealthResponse>
       stream_{};
   Event::Dispatcher& dispatcher_;
-  Runtime::Loader& runtime_;
+  Server::Configuration::ServerFactoryContext& server_context_;
   Envoy::Stats::Store& store_stats_;
   Ssl::ContextManager& ssl_context_manager_;
   ClusterInfoFactory& info_factory_;
-  AccessLog::AccessLogManager& access_log_manager_;
-  ClusterManager& cm_;
-  const LocalInfo::LocalInfo& local_info_;
-  Server::Admin& admin_;
-  Singleton::Manager& singleton_manager_;
   ThreadLocal::SlotAllocator& tls_;
 
   envoy::service::health::v3::HealthCheckRequestOrEndpointHealthResponse health_check_request_;
@@ -223,9 +199,6 @@ private:
 
   // How often envoy reports the healthcheck results to the server
   uint32_t server_response_ms_ = 0;
-
-  ProtobufMessage::ValidationVisitor& validation_visitor_;
-  Api::Api& api_;
 };
 
 using HdsDelegatePtr = std::unique_ptr<HdsDelegate>;

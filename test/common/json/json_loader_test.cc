@@ -1,8 +1,8 @@
 #include <string>
 #include <vector>
 
-#include "common/json/json_loader.h"
-#include "common/stats/isolated_store_impl.h"
+#include "source/common/json/json_loader.h"
+#include "source/common/stats/isolated_store_impl.h"
 
 #include "test/test_common/utility.h"
 
@@ -71,10 +71,10 @@ TEST_F(JsonLoaderTest, Basic) {
   }
 
   {
-    EXPECT_THROW_WITH_MESSAGE(
-        Factory::loadFromString("{\"hello\": \n\n\"world\""), Exception,
-        "JSON supplied is not valid. Error(offset 19, line 3): Missing a comma or "
-        "'}' after an object member.\n");
+    EXPECT_THROW_WITH_MESSAGE(Factory::loadFromString("{\"hello\": \n\n\"world\""), Exception,
+                              "JSON supplied is not valid. Error(line 3, column 8, token "
+                              "\"world\"): syntax error while "
+                              "parsing object - unexpected end of input; expected '}'\n");
   }
 
   {
@@ -205,6 +205,36 @@ TEST_F(JsonLoaderTest, Basic) {
     ObjectSharedPtr json = Factory::loadFromString("{}");
     EXPECT_TRUE(json->getObjectArray("hello", true).empty());
   }
+
+  {
+    ObjectSharedPtr json = Factory::loadFromString("[ null ]");
+    EXPECT_EQ(json->asJsonString(), "[null]");
+  }
+
+  {
+    ObjectSharedPtr json1 = Factory::loadFromString("[ [ ] , { } ]");
+    EXPECT_EQ(json1->asJsonString(), "[null,null]");
+  }
+
+  {
+    ObjectSharedPtr json1 = Factory::loadFromString("[ true ]");
+    EXPECT_EQ(json1->asJsonString(), "[true]");
+  }
+
+  {
+    ObjectSharedPtr json1 = Factory::loadFromString("{\"foo\": 123, \"bar\": \"cat\"}");
+    EXPECT_EQ(json1->asJsonString(), "{\"bar\":\"cat\",\"foo\":123}");
+  }
+
+  {
+    ObjectSharedPtr json = Factory::loadFromString("{\"hello\": {}}");
+    EXPECT_EQ(json->getObject("hello")->asJsonString(), "null");
+  }
+
+  {
+    ObjectSharedPtr json = Factory::loadFromString("{\"hello\": [] }");
+    EXPECT_EQ(json->asJsonString(), "{\"hello\":null}");
+  }
 }
 
 TEST_F(JsonLoaderTest, Integer) {
@@ -216,10 +246,6 @@ TEST_F(JsonLoaderTest, Integer) {
   }
   {
     EXPECT_THROW(Factory::loadFromString("{\"val\":9223372036854775808}"), EnvoyException);
-
-    // I believe this is a bug with rapidjson.
-    // It silently eats numbers below min int64_t with no exception.
-    // Fail when reading key instead of on parse.
     ObjectSharedPtr json = Factory::loadFromString("{\"val\":-9223372036854775809}");
     EXPECT_THROW(json->getInteger("val"), EnvoyException);
   }
@@ -242,6 +268,15 @@ TEST_F(JsonLoaderTest, Double) {
   }
 }
 
+TEST_F(JsonLoaderTest, LoadArray) {
+  ObjectSharedPtr json1 = Factory::loadFromString("[1.11, 22, \"cat\"]");
+  ObjectSharedPtr json2 = Factory::loadFromString("[22, \"cat\", 1.11]");
+
+  // Array values in different orders will not be the same.
+  EXPECT_NE(json1->asJsonString(), json2->asJsonString());
+  EXPECT_NE(json1->hash(), json2->hash());
+}
+
 TEST_F(JsonLoaderTest, Hash) {
   ObjectSharedPtr json1 = Factory::loadFromString("{\"value1\": 10.5, \"value2\": -12.3}");
   ObjectSharedPtr json2 = Factory::loadFromString("{\"value2\": -12.3, \"value1\": 10.5}");
@@ -254,17 +289,15 @@ TEST_F(JsonLoaderTest, Hash) {
   EXPECT_EQ(json2->hash(), json3->hash());
   // Ensure different hash is computed for different objects
   EXPECT_NE(json1->hash(), json4->hash());
+
+  // Nested objects with keys in different orders should be the same.
+  ObjectSharedPtr json5 = Factory::loadFromString("{\"value1\": {\"a\": true, \"b\": null}}");
+  ObjectSharedPtr json6 = Factory::loadFromString("{\"value1\": {\"b\": null, \"a\": true}}");
+  EXPECT_EQ(json5->hash(), json6->hash());
 }
 
 TEST_F(JsonLoaderTest, Schema) {
-  {
-    std::string invalid_json_schema = R"EOF(
-    {
-      "properties": {"value1"}
-    }
-    )EOF";
-
-    std::string invalid_schema = R"EOF(
+  std::string invalid_schema = R"EOF(
     {
       "properties" : {
         "value1": {"type" : "faketype"}
@@ -272,82 +305,15 @@ TEST_F(JsonLoaderTest, Schema) {
     }
     )EOF";
 
-    std::string different_schema = R"EOF(
-    {
-      "properties" : {
-        "value1" : {"type" : "number"}
-      },
-      "additionalProperties" : false
-    }
-    )EOF";
-
-    std::string valid_schema = R"EOF(
-    {
-      "properties": {
-        "value1": {"type" : "number"},
-        "value2": {"type": "string"}
-      },
-      "additionalProperties": false
-    }
-    )EOF";
-
-    std::string json_string = R"EOF(
+  std::string json_string = R"EOF(
     {
       "value1": 10,
       "value2" : "test"
     }
     )EOF";
 
-    ObjectSharedPtr json = Factory::loadFromString(json_string);
-    EXPECT_THROW(json->validateSchema(invalid_json_schema), std::invalid_argument);
-    EXPECT_THROW(json->validateSchema(invalid_schema), Exception);
-    EXPECT_THROW(json->validateSchema(different_schema), Exception);
-    EXPECT_NO_THROW(json->validateSchema(valid_schema));
-  }
-
-  {
-    std::string json_string = R"EOF(
-    {
-      "value1": [false, 2.01, 3, null],
-      "value2" : "test"
-    }
-    )EOF";
-
-    std::string empty_schema = R"EOF({})EOF";
-
-    ObjectSharedPtr json = Factory::loadFromString(json_string);
-    EXPECT_NO_THROW(json->validateSchema(empty_schema));
-  }
-}
-
-TEST_F(JsonLoaderTest, NestedSchema) {
-
-  std::string schema = R"EOF(
-  {
-    "properties": {
-      "value1": {"type" : "number"},
-      "value2": {"type": "string"}
-    },
-    "additionalProperties": false
-  }
-  )EOF";
-
-  std::string json_string = R"EOF(
-  {
-    "bar": "baz",
-    "foo": {
-      "value1": "should have been a number",
-      "value2" : "test"
-    }
-  }
-  )EOF";
-
   ObjectSharedPtr json = Factory::loadFromString(json_string);
-
-  EXPECT_THROW_WITH_MESSAGE(json->getObject("foo")->validateSchema(schema), Exception,
-                            "JSON at lines 4-7 does not conform to schema.\n Invalid schema: "
-                            "#/properties/value1\n Schema violation: type\n Offending document "
-                            "key: #/value1");
+  EXPECT_THROW_WITH_MESSAGE(json->validateSchema(invalid_schema), Exception, "not implemented");
 }
 
 TEST_F(JsonLoaderTest, MissingEnclosingDocument) {
@@ -360,10 +326,10 @@ TEST_F(JsonLoaderTest, MissingEnclosingDocument) {
     }
   ]
   )EOF";
-
-  EXPECT_THROW_WITH_MESSAGE(Factory::loadFromString(json_string), Exception,
-                            "JSON supplied is not valid. Error(offset 14, line 2): Terminate "
-                            "parsing due to Handler error.\n");
+  EXPECT_THROW_WITH_MESSAGE(
+      Factory::loadFromString(json_string), Exception,
+      "JSON supplied is not valid. Error(line 2, column 15, token \"listeners\" :): syntax error "
+      "while parsing value - unexpected ':'; expected end of input\n");
 }
 
 TEST_F(JsonLoaderTest, AsString) {

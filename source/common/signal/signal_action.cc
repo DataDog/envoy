@@ -1,11 +1,12 @@
-#include "common/signal/signal_action.h"
+#include "source/common/signal/signal_action.h"
 
 #include <sys/mman.h>
 
 #include <csignal>
 
-#include "common/common/assert.h"
-#include "common/version/version.h"
+#include "source/common/common/assert.h"
+#include "source/common/signal/fatal_action.h"
+#include "source/common/version/version.h"
 
 namespace Envoy {
 
@@ -22,20 +23,47 @@ void SignalAction::sigHandler(int sig, siginfo_t* info, void* context) {
   }
   tracer.logTrace();
 
-  // Finally after logging the stack trace, call any registered crash handlers.
-  FatalErrorHandler::callFatalErrorHandlers(std::cerr);
+  // Finally after logging the stack trace, call the crash handlers
+  // in order from safe to unsafe.
+  auto status = FatalErrorHandler::runSafeActions();
+
+  switch (status) {
+  case FatalAction::Status::Success:
+    FatalErrorHandler::callFatalErrorHandlers(std::cerr);
+    FatalErrorHandler::runUnsafeActions();
+    break;
+  case FatalAction::Status::ActionManagerUnset:
+    FatalErrorHandler::callFatalErrorHandlers(std::cerr);
+    break;
+  case FatalAction::Status::RunningOnAnotherThread: {
+    // We should wait for some duration for the other thread to finish
+    // running. We should add support for this scenario, even though the
+    // probability of it occurring is low.
+    // TODO(kbaichoo): Implement a configurable call to sleep
+    PANIC("not implemented");
+    break;
+  }
+  case FatalAction::Status::AlreadyRanOnThisThread:
+    // We caused another fatal signal to be raised.
+    std::cerr << "Our FatalActions triggered a fatal signal.\n";
+    break;
+  }
 
   signal(sig, SIG_DFL);
   raise(sig);
 }
 
 void SignalAction::installSigHandlers() {
+  // sigaltstack and backtrace() are incompatible on Apple platforms
+  // https://reviews.llvm.org/D28265
+#if !defined(__APPLE__)
   stack_t stack;
   stack.ss_sp = altstack_ + guard_size_; // Guard page at one end ...
   stack.ss_size = altstack_size_;        // ... guard page at the other
   stack.ss_flags = 0;
 
   RELEASE_ASSERT(sigaltstack(&stack, &previous_altstack_) == 0, "");
+#endif
 
   // Make sure VersionInfo::version() is initialized so we don't allocate std::string in signal
   // handlers.
@@ -54,13 +82,11 @@ void SignalAction::installSigHandlers() {
 }
 
 void SignalAction::removeSigHandlers() {
-#if defined(__APPLE__)
-  // ss_flags contains SS_DISABLE, but Darwin still checks the size, contrary to the man page
-  if (previous_altstack_.ss_size < MINSIGSTKSZ) {
-    previous_altstack_.ss_size = MINSIGSTKSZ;
-  }
-#endif
+// sigaltstack and backtrace() are incompatible on Apple platforms
+// https://reviews.llvm.org/D28265
+#if !defined(__APPLE__)
   RELEASE_ASSERT(sigaltstack(&previous_altstack_, nullptr) == 0, "");
+#endif
 
   int hidx = 0;
   for (const auto& sig : FATAL_SIGS) {

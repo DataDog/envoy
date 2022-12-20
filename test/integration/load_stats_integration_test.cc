@@ -17,13 +17,13 @@
 namespace Envoy {
 namespace {
 
-class LoadStatsIntegrationTest : public Grpc::VersionedGrpcClientIntegrationParamTest,
+class LoadStatsIntegrationTest : public Grpc::GrpcClientIntegrationParamTest,
                                  public HttpIntegrationTest {
 public:
-  LoadStatsIntegrationTest() : HttpIntegrationTest(Http::CodecClient::Type::HTTP1, ipVersion()) {
+  LoadStatsIntegrationTest() : HttpIntegrationTest(Http::CodecType::HTTP1, ipVersion()) {
     // We rely on some fairly specific load balancing picks in this test, so
     // determinize the schedule.
-    setDeterministic();
+    setDeterministicValue();
   }
 
   void addEndpoint(envoy::config::endpoint::v3::LocalityLbEndpoints& locality_lb_endpoints,
@@ -99,7 +99,7 @@ public:
   }
 
   void createUpstreams() override {
-    addFakeUpstream(FakeHttpConnection::Type::HTTP2);
+    addFakeUpstream(Http::CodecType::HTTP2);
     load_report_upstream_ = fake_upstreams_.back().get();
     HttpIntegrationTest::createUpstreams();
   }
@@ -111,12 +111,12 @@ public:
       auto* loadstats_config = bootstrap.mutable_cluster_manager()->mutable_load_stats_config();
       loadstats_config->set_api_type(envoy::config::core::v3::ApiConfigSource::GRPC);
       loadstats_config->add_grpc_services()->mutable_envoy_grpc()->set_cluster_name("load_report");
-      loadstats_config->set_transport_api_version(apiVersion());
+      loadstats_config->set_transport_api_version(envoy::config::core::v3::ApiVersion::V3);
       auto* load_report_cluster = bootstrap.mutable_static_resources()->add_clusters();
       load_report_cluster->MergeFrom(bootstrap.static_resources().clusters()[0]);
       load_report_cluster->mutable_circuit_breakers()->Clear();
       load_report_cluster->set_name("load_report");
-      load_report_cluster->mutable_http2_protocol_options();
+      ConfigHelper::setHttp2(*load_report_cluster);
       // Put ourselves in a locality that will be used in
       // updateClusterLoadAssignment()
       auto* locality = bootstrap.mutable_node()->mutable_locality();
@@ -127,7 +127,10 @@ public:
       auto* cluster_0 = bootstrap.mutable_static_resources()->mutable_clusters(0);
       cluster_0->set_type(envoy::config::cluster::v3::Cluster::EDS);
       auto* eds_cluster_config = cluster_0->mutable_eds_cluster_config();
-      eds_cluster_config->mutable_eds_config()->set_path(eds_helper_.eds_path());
+      eds_cluster_config->mutable_eds_config()->set_resource_api_version(
+          envoy::config::core::v3::ApiVersion::V3);
+      eds_cluster_config->mutable_eds_config()->mutable_path_config_source()->set_path(
+          eds_helper_.eds_path());
       eds_cluster_config->set_service_name("service_name_0");
       if (locality_weighted_lb_) {
         cluster_0->mutable_common_lb_config()->mutable_locality_weighted_lb_config();
@@ -283,10 +286,8 @@ public:
       mergeLoadStats(loadstats_request, local_loadstats_request);
 
       EXPECT_EQ("POST", loadstats_stream_->headers().getMethodValue());
-      EXPECT_EQ(
-          TestUtility::getVersionedMethodPath("envoy.service.load_stats.{}.LoadReportingService",
-                                              "StreamLoadStats", apiVersion()),
-          loadstats_stream_->headers().getPathValue());
+      EXPECT_EQ("/envoy.service.load_stats.v3.LoadReportingService/StreamLoadStats",
+                loadstats_stream_->headers().getPathValue());
       EXPECT_EQ("application/grpc", loadstats_stream_->headers().getContentTypeValue());
       if (!bound.withinBound()) {
         return TestUtility::assertRepeatedPtrFieldEqual(expected_cluster_stats,
@@ -309,7 +310,7 @@ public:
     upstream_request_->encodeHeaders(
         Http::TestResponseHeaderMapImpl{{":status", std::to_string(response_code)}}, false);
     upstream_request_->encodeData(response_size_, true);
-    response_->waitForEndStream();
+    ASSERT_TRUE(response_->waitForEndStream());
 
     ASSERT_TRUE(upstream_request_->complete());
     EXPECT_EQ(request_size_, upstream_request_->bodyLength());
@@ -385,7 +386,8 @@ public:
 };
 
 INSTANTIATE_TEST_SUITE_P(IpVersionsClientType, LoadStatsIntegrationTest,
-                         VERSIONED_GRPC_CLIENT_INTEGRATION_PARAMS);
+                         GRPC_CLIENT_INTEGRATION_PARAMS,
+                         Grpc::GrpcClientIntegrationParamTest::protocolTestParamsToString);
 
 // Validate the load reports for successful requests as cluster membership
 // changes.
@@ -630,7 +632,7 @@ TEST_P(LoadStatsIntegrationTest, Dropped) {
   requestLoadStatsResponse({"cluster_0"});
   // This should count as dropped, since we trigger circuit breaking.
   initiateClientConnection();
-  response_->waitForEndStream();
+  ASSERT_TRUE(response_->waitForEndStream());
   ASSERT_TRUE(response_->complete());
   EXPECT_EQ("503", response_->headers().getStatusValue());
   cleanupUpstreamAndDownstream();

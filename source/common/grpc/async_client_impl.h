@@ -6,11 +6,11 @@
 #include "envoy/config/core/v3/grpc_service.pb.h"
 #include "envoy/grpc/async_client.h"
 
-#include "common/common/linked_object.h"
-#include "common/grpc/codec.h"
-#include "common/grpc/typed_async_client.h"
-#include "common/http/async_client_impl.h"
-#include "common/router/header_parser.h"
+#include "source/common/common/linked_object.h"
+#include "source/common/grpc/codec.h"
+#include "source/common/grpc/typed_async_client.h"
+#include "source/common/http/async_client_impl.h"
+#include "source/common/router/header_parser.h"
 
 namespace Envoy {
 namespace Grpc {
@@ -34,6 +34,7 @@ public:
   RawAsyncStream* startRaw(absl::string_view service_full_name, absl::string_view method_name,
                            RawAsyncStreamCallbacks& callbacks,
                            const Http::AsyncClient::StreamOptions& options) override;
+  absl::string_view destination() override { return remote_cluster_name_; }
 
 private:
   Upstream::ClusterManager& cm_;

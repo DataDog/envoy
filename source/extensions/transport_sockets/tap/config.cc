@@ -1,15 +1,14 @@
-#include "extensions/transport_sockets/tap/config.h"
+#include "source/extensions/transport_sockets/tap/config.h"
 
 #include "envoy/config/tap/v3/common.pb.h"
 #include "envoy/extensions/transport_sockets/tap/v3/tap.pb.h"
 #include "envoy/extensions/transport_sockets/tap/v3/tap.pb.validate.h"
 #include "envoy/registry/registry.h"
 
-#include "common/config/utility.h"
-#include "common/protobuf/utility.h"
-
-#include "extensions/transport_sockets/tap/tap.h"
-#include "extensions/transport_sockets/tap/tap_config_impl.h"
+#include "source/common/config/utility.h"
+#include "source/common/protobuf/utility.h"
+#include "source/extensions/transport_sockets/tap/tap.h"
+#include "source/extensions/transport_sockets/tap/tap_config_impl.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -32,7 +31,8 @@ private:
   TimeSource& time_source_;
 };
 
-Network::TransportSocketFactoryPtr UpstreamTapSocketConfigFactory::createTransportSocketFactory(
+Network::UpstreamTransportSocketFactoryPtr
+UpstreamTapSocketConfigFactory::createTransportSocketFactory(
     const Protobuf::Message& message,
     Server::Configuration::TransportSocketFactoryContext& context) {
   const auto& outer_config =
@@ -45,12 +45,14 @@ Network::TransportSocketFactoryPtr UpstreamTapSocketConfigFactory::createTranspo
   auto inner_transport_factory =
       inner_config_factory.createTransportSocketFactory(*inner_factory_config, context);
   return std::make_unique<TapSocketFactory>(
-      outer_config, std::make_unique<SocketTapConfigFactoryImpl>(context.dispatcher().timeSource()),
-      context.admin(), context.singletonManager(), context.threadLocal(), context.dispatcher(),
-      std::move(inner_transport_factory));
+      outer_config,
+      std::make_unique<SocketTapConfigFactoryImpl>(context.mainThreadDispatcher().timeSource()),
+      context.admin(), context.singletonManager(), context.threadLocal(),
+      context.mainThreadDispatcher(), std::move(inner_transport_factory));
 }
 
-Network::TransportSocketFactoryPtr DownstreamTapSocketConfigFactory::createTransportSocketFactory(
+Network::DownstreamTransportSocketFactoryPtr
+DownstreamTapSocketConfigFactory::createTransportSocketFactory(
     const Protobuf::Message& message, Server::Configuration::TransportSocketFactoryContext& context,
     const std::vector<std::string>& server_names) {
   const auto& outer_config =
@@ -63,10 +65,11 @@ Network::TransportSocketFactoryPtr DownstreamTapSocketConfigFactory::createTrans
       outer_config.transport_socket(), context.messageValidationVisitor(), inner_config_factory);
   auto inner_transport_factory = inner_config_factory.createTransportSocketFactory(
       *inner_factory_config, context, server_names);
-  return std::make_unique<TapSocketFactory>(
-      outer_config, std::make_unique<SocketTapConfigFactoryImpl>(context.dispatcher().timeSource()),
-      context.admin(), context.singletonManager(), context.threadLocal(), context.dispatcher(),
-      std::move(inner_transport_factory));
+  return std::make_unique<DownstreamTapSocketFactory>(
+      outer_config,
+      std::make_unique<SocketTapConfigFactoryImpl>(context.mainThreadDispatcher().timeSource()),
+      context.admin(), context.singletonManager(), context.threadLocal(),
+      context.mainThreadDispatcher(), std::move(inner_transport_factory));
 }
 
 ProtobufTypes::MessagePtr TapSocketConfigFactory::createEmptyConfigProto() {

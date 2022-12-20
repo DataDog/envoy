@@ -1,13 +1,12 @@
 #include "envoy/extensions/stat_sinks/wasm/v3/wasm.pb.validate.h"
 #include "envoy/registry/registry.h"
 
-#include "common/protobuf/protobuf.h"
+#include "source/common/protobuf/protobuf.h"
+#include "source/extensions/common/wasm/wasm.h"
+#include "source/extensions/stat_sinks/wasm/config.h"
+#include "source/extensions/stat_sinks/wasm/wasm_stat_sink_impl.h"
 
-#include "extensions/common/wasm/wasm.h"
-#include "extensions/stat_sinks/wasm/config.h"
-#include "extensions/stat_sinks/wasm/wasm_stat_sink_impl.h"
-#include "extensions/stat_sinks/well_known_names.h"
-
+#include "test/extensions/common/wasm/wasm_runtime.h"
 #include "test/mocks/server/mocks.h"
 #include "test/test_common/environment.h"
 #include "test/test_common/printers.h"
@@ -21,12 +20,12 @@ namespace Extensions {
 namespace StatSinks {
 namespace Wasm {
 
-class WasmStatSinkConfigTest : public testing::TestWithParam<std::string> {
+class WasmStatSinkConfigTest : public testing::TestWithParam<std::tuple<std::string, std::string>> {
 protected:
   WasmStatSinkConfigTest() {
     config_.mutable_config()->mutable_vm_config()->set_runtime(
-        absl::StrCat("envoy.wasm.runtime.", GetParam()));
-    if (GetParam() != "null") {
+        absl::StrCat("envoy.wasm.runtime.", std::get<0>(GetParam())));
+    if (std::get<0>(GetParam()) != "null") {
       config_.mutable_config()->mutable_vm_config()->mutable_code()->mutable_local()->set_filename(
           TestEnvironment::substitute(
               "{{ test_rundir "
@@ -42,8 +41,8 @@ protected:
   }
 
   void initializeWithConfig(const envoy::extensions::stat_sinks::wasm::v3::Wasm& config) {
-    auto factory = Registry::FactoryRegistry<Server::Configuration::StatsSinkFactory>::getFactory(
-        StatsSinkNames::get().Wasm);
+    auto factory =
+        Registry::FactoryRegistry<Server::Configuration::StatsSinkFactory>::getFactory(WasmName);
     ASSERT_NE(factory, nullptr);
     api_ = Api::createApiForTest(stats_store_);
     EXPECT_CALL(context_, api()).WillRepeatedly(testing::ReturnRef(*api_));
@@ -65,17 +64,9 @@ protected:
   Stats::SinkPtr sink_;
 };
 
-// NB: this is required by VC++ which can not handle the use of macros in the macro definitions
-// used by INSTANTIATE_TEST_SUITE_P.
-auto testing_values = testing::Values(
-#if defined(ENVOY_WASM_V8)
-    "v8",
-#endif
-#if defined(ENVOY_WASM_WAVM)
-    "wavm",
-#endif
-    "null");
-INSTANTIATE_TEST_SUITE_P(Runtimes, WasmStatSinkConfigTest, testing_values);
+INSTANTIATE_TEST_SUITE_P(Runtimes, WasmStatSinkConfigTest,
+                         Envoy::Extensions::Common::Wasm::runtime_and_cpp_values,
+                         Envoy::Extensions::Common::Wasm::wasmTestParamsToString);
 
 TEST_P(WasmStatSinkConfigTest, CreateWasmFromEmpty) {
   envoy::extensions::stat_sinks::wasm::v3::Wasm config;
@@ -94,6 +85,9 @@ TEST_P(WasmStatSinkConfigTest, CreateWasmFromWASM) {
   initializeWithConfig(config_);
 
   EXPECT_NE(sink_, nullptr);
+  // Check if the custom stat namespace is registered during the initialization.
+  EXPECT_TRUE(api_->customStatNamespaces().registered("wasmcustom"));
+
   NiceMock<Stats::MockMetricSnapshot> snapshot;
   sink_->flush(snapshot);
   NiceMock<Stats::MockHistogram> histogram;

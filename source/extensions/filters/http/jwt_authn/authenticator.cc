@@ -1,20 +1,24 @@
-#include "extensions/filters/http/jwt_authn/authenticator.h"
+#include "source/extensions/filters/http/jwt_authn/authenticator.h"
 
 #include "envoy/http/async_client.h"
 
-#include "common/common/assert.h"
-#include "common/common/enum_to_int.h"
-#include "common/common/logger.h"
-#include "common/http/message_impl.h"
-#include "common/http/utility.h"
-#include "common/protobuf/protobuf.h"
-#include "common/tracing/http_tracer_impl.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/base64.h"
+#include "source/common/common/enum_to_int.h"
+#include "source/common/common/logger.h"
+#include "source/common/http/message_impl.h"
+#include "source/common/http/utility.h"
+#include "source/common/json/json_loader.h"
+#include "source/common/protobuf/protobuf.h"
+#include "source/common/tracing/http_tracer_impl.h"
 
 #include "jwt_verify_lib/jwt.h"
+#include "jwt_verify_lib/struct_utils.h"
 #include "jwt_verify_lib/verify.h"
 
 using ::google::jwt_verify::CheckAudience;
 using ::google::jwt_verify::Status;
+using ::google::jwt_verify::StructUtils;
 
 namespace Envoy {
 namespace Extensions {
@@ -22,6 +26,18 @@ namespace HttpFilters {
 namespace JwtAuthn {
 namespace {
 
+// If the number is unsigned 64 bit integer, convert to string as integer,
+// otherwise, convert to string as double.
+static std::string convertClaimDoubleToString(double double_value) {
+  double int_part;
+  if (double_value < 0 ||
+      double_value >= static_cast<double>(std::numeric_limits<uint64_t>::max()) ||
+      modf(double_value, &int_part) != 0) {
+    return std::to_string(double_value);
+  }
+  const uint64_t int_claim_value = static_cast<uint64_t>(double_value);
+  return std::to_string(int_claim_value);
+}
 /**
  * Object to implement Authenticator interface.
  */
@@ -38,13 +54,13 @@ public:
         create_jwks_fetcher_cb_(create_jwks_fetcher_cb), check_audience_(check_audience),
         provider_(provider), is_allow_failed_(allow_failed), is_allow_missing_(allow_missing),
         time_source_(time_source) {}
-
   // Following functions are for JwksFetcher::JwksReceiver interface
   void onJwksSuccess(google::jwt_verify::JwksPtr&& jwks) override;
   void onJwksError(Failure reason) override;
-  // Following functions are for Authenticator interface
+  // Following functions are for Authenticator interface.
   void verify(Http::HeaderMap& headers, Tracing::Span& parent_span,
-              std::vector<JwtLocationConstPtr>&& tokens, SetPayloadCallback set_payload_cb,
+              std::vector<JwtLocationConstPtr>&& tokens,
+              SetExtractedJwtDataCallback set_extracted_jwt_data_cb,
               AuthenticatorCallback callback) override;
   void onDestroy() override;
 
@@ -57,6 +73,9 @@ private:
   // Verify with a specific public key.
   void verifyKey();
 
+  // Handle Good Jwt either Cache JWT or verified public key.
+  void handleGoodJwt(bool cache_hit);
+
   // Calls the callback with status.
   void doneWithStatus(const Status& status);
 
@@ -64,8 +83,12 @@ private:
   // finds one to verify with key.
   void startVerify();
 
+  // Copy the JWT Claim to HTTP Header
+  void addJWTClaimToHeader(const std::string& claim_name, const std::string& header_name);
+
   // The jwks cache object.
   JwksCache& jwks_cache_;
+
   // the cluster manager object.
   Upstream::ClusterManager& cm_;
 
@@ -79,16 +102,15 @@ private:
   std::vector<JwtLocationConstPtr> tokens_;
   JwtLocationConstPtr curr_token_;
   // The JWT object.
-  std::unique_ptr<::google::jwt_verify::Jwt> jwt_;
+  std::unique_ptr<::google::jwt_verify::Jwt> owned_jwt_;
   // The JWKS data object
   JwksCache::JwksData* jwks_data_{};
-
   // The HTTP request headers
   Http::HeaderMap* headers_{};
   // The active span for the request
   Tracing::Span* parent_span_{&Tracing::NullSpan::instance()};
-  // the callback function to set payload
-  SetPayloadCallback set_payload_cb_;
+  // The callback function called to set the extracted payload and header from a verified JWT.
+  SetExtractedJwtDataCallback set_extracted_jwt_data_cb_;
   // The on_done function.
   AuthenticatorCallback callback_;
   // check audience object.
@@ -98,6 +120,7 @@ private:
   const bool is_allow_failed_;
   const bool is_allow_missing_;
   TimeSource& time_source_;
+  ::google::jwt_verify::Jwt* jwt_{};
 };
 
 std::string AuthenticatorImpl::name() const {
@@ -115,12 +138,13 @@ std::string AuthenticatorImpl::name() const {
 
 void AuthenticatorImpl::verify(Http::HeaderMap& headers, Tracing::Span& parent_span,
                                std::vector<JwtLocationConstPtr>&& tokens,
-                               SetPayloadCallback set_payload_cb, AuthenticatorCallback callback) {
+                               SetExtractedJwtDataCallback set_extracted_jwt_data_cb,
+                               AuthenticatorCallback callback) {
   ASSERT(!callback_);
   headers_ = &headers;
   parent_span_ = &parent_span;
   tokens_ = std::move(tokens);
-  set_payload_cb_ = std::move(set_payload_cb);
+  set_extracted_jwt_data_cb_ = std::move(set_extracted_jwt_data_cb);
   callback_ = std::move(callback);
 
   ENVOY_LOG(debug, "{}: JWT authentication starts (allow_failed={}), tokens size={}", name(),
@@ -139,60 +163,62 @@ void AuthenticatorImpl::startVerify() {
   curr_token_ = std::move(tokens_.back());
   tokens_.pop_back();
 
-  jwt_ = std::make_unique<::google::jwt_verify::Jwt>();
+  if (provider_.has_value()) {
+    jwks_data_ = jwks_cache_.findByProvider(*provider_);
+    jwt_ = jwks_data_->getJwtCache().lookup(curr_token_->token());
+    if (jwt_ != nullptr) {
+      handleGoodJwt(/*cache_hit=*/true);
+      return;
+    }
+  }
+
   ENVOY_LOG(debug, "{}: Parse Jwt {}", name(), curr_token_->token());
-  const Status status = jwt_->parseFromString(curr_token_->token());
+  owned_jwt_ = std::make_unique<::google::jwt_verify::Jwt>();
+  Status status = owned_jwt_->parseFromString(curr_token_->token());
+  jwt_ = owned_jwt_.get();
+
   if (status != Status::Ok) {
     doneWithStatus(status);
     return;
   }
 
   ENVOY_LOG(debug, "{}: Verifying JWT token of issuer {}", name(), jwt_->iss_);
-  if (!jwt_->iss_.empty()) {
-    // Check if token extracted from the location contains the issuer specified by config.
-    if (!curr_token_->isIssuerSpecified(jwt_->iss_)) {
-      doneWithStatus(Status::JwtUnknownIssuer);
-      return;
-    }
-  } else {
-    // If provider is not specified, in allow_missing_or_failed or allow_missing case,
-    // the issuer specified in "iss" payload is required in order to lookup provider.
-    if (!provider_) {
-      doneWithStatus(Status::JwtUnknownIssuer);
-      return;
-    }
-  }
-
-  // TODO(qiwzhang): Cross-platform-wise the below unix_timestamp code is wrong as the
-  // epoch is not guaranteed to be defined as the unix epoch. We should use
-  // the abseil time functionality instead or use the jwt_verify_lib to check
-  // the validity of a JWT.
-  // Check "exp" claim.
-  const uint64_t unix_timestamp =
-      std::chrono::duration_cast<std::chrono::seconds>(timeSource().systemTime().time_since_epoch())
-          .count();
-  // If the nbf claim does *not* appear in the JWT, then the nbf field is defaulted
-  // to 0.
-  if (jwt_->nbf_ > unix_timestamp) {
-    doneWithStatus(Status::JwtNotYetValid);
-    return;
-  }
-  // If the exp claim does *not* appear in the JWT then the exp field is defaulted
-  // to 0.
-  if (jwt_->exp_ > 0 && jwt_->exp_ < unix_timestamp) {
-    doneWithStatus(Status::JwtExpired);
+  // Check if `iss` is allowed.
+  if (!curr_token_->isIssuerAllowed(jwt_->iss_)) {
+    doneWithStatus(Status::JwtUnknownIssuer);
     return;
   }
 
-  // Check the issuer is configured or not.
-  jwks_data_ = provider_ ? jwks_cache_.findByProvider(provider_.value())
-                         : jwks_cache_.findByIssuer(jwt_->iss_);
-  // isIssuerSpecified() check already make sure the issuer is in the cache.
-  ASSERT(jwks_data_ != nullptr);
+  // Issuer is configured
+  if (!provider_) {
+    jwks_data_ = jwks_cache_.findByIssuer(jwt_->iss_);
+  }
+  // When `provider` is valid, findByProvider should never return nullptr.
+  // Only when `allow_missing` or `allow_failed` is used, `provider` is invalid,
+  // and this authenticator is checking tokens from all providers. In this case,
+  // Jwt `iss` field is used to find the first provider with the issuer.
+  // If not found, use the first provider without issuer specified.
+  // If still no found, fail the request with UnknownIssuer error.
+  if (!jwks_data_) {
+    doneWithStatus(Status::JwtUnknownIssuer);
+    return;
+  }
+
+  // Default is 60 seconds
+  uint64_t clock_skew_seconds = ::google::jwt_verify::kClockSkewInSecond;
+  if (jwks_data_->getJwtProvider().clock_skew_seconds() > 0) {
+    clock_skew_seconds = jwks_data_->getJwtProvider().clock_skew_seconds();
+  }
+  const uint64_t unix_timestamp = DateUtil::nowToSeconds(timeSource());
+  status = jwt_->verifyTimeConstraint(unix_timestamp, clock_skew_seconds);
+  if (status != Status::Ok) {
+    doneWithStatus(status);
+    return;
+  }
 
   // Check if audience is allowed
-  bool is_allowed = check_audience_ ? check_audience_->areAudiencesAllowed(jwt_->audiences_)
-                                    : jwks_data_->areAudiencesAllowed(jwt_->audiences_);
+  const bool is_allowed = check_audience_ ? check_audience_->areAudiencesAllowed(jwt_->audiences_)
+                                          : jwks_data_->areAudiencesAllowed(jwt_->audiences_);
   if (!is_allowed) {
     doneWithStatus(Status::JwtAudienceNotAllowed);
     return;
@@ -207,20 +233,21 @@ void AuthenticatorImpl::startVerify() {
     // the key cached, if we do proceed to verify else try a new JWKS retrieval.
     // JWTs without a kid header field in the JWS we might be best to get each
     // time? This all only matters for remote JWKS.
+
     verifyKey();
     return;
   }
 
   // TODO(potatop): potential optimization.
-  // Only one remote jwks will be fetched, verify will not continue util it is completed. This is
+  // Only one remote jwks will be fetched, verify will not continue until it is completed. This is
   // fine for provider name requirements, as each provider has only one issuer, but for allow
   // missing or failed there can be more than one issuers. This can be optimized; the same remote
   // jwks fetching can be shared by two requests.
   if (jwks_data_->getJwtProvider().has_remote_jwks()) {
     if (!fetcher_) {
-      fetcher_ = create_jwks_fetcher_cb_(cm_);
+      fetcher_ = create_jwks_fetcher_cb_(cm_, jwks_data_->getJwtProvider().remote_jwks());
     }
-    fetcher_->fetch(jwks_data_->getJwtProvider().remote_jwks().http_uri(), *parent_span_, *this);
+    fetcher_->fetch(*parent_span_, *this);
     return;
   }
   // No valid keys for this issuer. This may happen as a result of incorrect local
@@ -229,6 +256,7 @@ void AuthenticatorImpl::startVerify() {
 }
 
 void AuthenticatorImpl::onJwksSuccess(google::jwt_verify::JwksPtr&& jwks) {
+  jwks_cache_.stats().jwks_fetch_success_.inc();
   const Status status = jwks_data_->setRemoteJwks(std::move(jwks))->getStatus();
   if (status != Status::Ok) {
     doneWithStatus(status);
@@ -237,7 +265,10 @@ void AuthenticatorImpl::onJwksSuccess(google::jwt_verify::JwksPtr&& jwks) {
   }
 }
 
-void AuthenticatorImpl::onJwksError(Failure) { doneWithStatus(Status::JwksFetchFail); }
+void AuthenticatorImpl::onJwksError(Failure) {
+  jwks_cache_.stats().jwks_fetch_failed_.inc();
+  doneWithStatus(Status::JwksFetchFail);
+}
 
 void AuthenticatorImpl::onDestroy() {
   if (fetcher_) {
@@ -247,17 +278,62 @@ void AuthenticatorImpl::onDestroy() {
 
 // Verify with a specific public key.
 void AuthenticatorImpl::verifyKey() {
-  const Status status = ::google::jwt_verify::verifyJwt(*jwt_, *jwks_data_->getJwksObj());
+  const Status status =
+      ::google::jwt_verify::verifyJwtWithoutTimeChecking(*jwt_, *jwks_data_->getJwksObj());
+
   if (status != Status::Ok) {
     doneWithStatus(status);
     return;
   }
+  handleGoodJwt(/*cache_hit=*/false);
+}
 
+void AuthenticatorImpl::addJWTClaimToHeader(const std::string& claim_name,
+                                            const std::string& header_name) {
+  StructUtils payload_getter(jwt_->payload_pb_);
+  const ProtobufWkt::Value* claim_value;
+  const auto status = payload_getter.GetValue(claim_name, claim_value);
+  std::string str_claim_value;
+  if (status == StructUtils::OK) {
+    if (claim_value->kind_case() == Envoy::ProtobufWkt::Value::kStringValue) {
+      str_claim_value = claim_value->string_value();
+    } else if (claim_value->kind_case() == Envoy::ProtobufWkt::Value::kNumberValue) {
+      str_claim_value = convertClaimDoubleToString(claim_value->number_value());
+    } else if (claim_value->kind_case() == Envoy::ProtobufWkt::Value::kBoolValue) {
+      str_claim_value = claim_value->bool_value() ? "true" : "false";
+    } else {
+      ENVOY_LOG(
+          debug,
+          "--------claim : {} is not a primitive type of int, double, string, or bool -----------",
+          claim_name);
+    }
+    if (!str_claim_value.empty()) {
+      headers_->addCopy(Http::LowerCaseString(header_name), str_claim_value);
+      ENVOY_LOG(debug, "--------claim : {} with value : {} is added to the header : {} -----------",
+                claim_name, str_claim_value, header_name);
+    }
+  }
+}
+
+void AuthenticatorImpl::handleGoodJwt(bool cache_hit) {
   // Forward the payload
   const auto& provider = jwks_data_->getJwtProvider();
+
   if (!provider.forward_payload_header().empty()) {
-    headers_->addCopy(Http::LowerCaseString(provider.forward_payload_header()),
-                      jwt_->payload_str_base64url_);
+    if (provider.pad_forward_payload_header()) {
+      std::string payload_with_padding = jwt_->payload_str_base64url_;
+      Base64::completePadding(payload_with_padding);
+      headers_->addCopy(Http::LowerCaseString(provider.forward_payload_header()),
+                        payload_with_padding);
+    } else {
+      headers_->addCopy(Http::LowerCaseString(provider.forward_payload_header()),
+                        jwt_->payload_str_base64url_);
+    }
+  }
+
+  // Copy JWT claim to header
+  for (const auto& header_and_claim : provider.claim_to_headers()) {
+    addJWTClaimToHeader(header_and_claim.claim_name(), header_and_claim.header_name());
   }
 
   if (!provider.forward()) {
@@ -265,10 +341,20 @@ void AuthenticatorImpl::verifyKey() {
     // Remove JWT from headers.
     curr_token_->removeJwt(*headers_);
   }
-  if (set_payload_cb_ && !provider.payload_in_metadata().empty()) {
-    set_payload_cb_(provider.payload_in_metadata(), jwt_->payload_pb_);
-  }
 
+  if (set_extracted_jwt_data_cb_) {
+    if (!provider.header_in_metadata().empty()) {
+      set_extracted_jwt_data_cb_(provider.header_in_metadata(), jwt_->header_pb_);
+    }
+
+    if (!provider.payload_in_metadata().empty()) {
+      set_extracted_jwt_data_cb_(provider.payload_in_metadata(), jwt_->payload_pb_);
+    }
+  }
+  if (provider_ && !cache_hit) {
+    // move the ownership of "owned_jwt_" into the function.
+    jwks_data_->getJwtCache().insert(curr_token_->token(), std::move(owned_jwt_));
+  }
   doneWithStatus(Status::Ok);
 }
 
@@ -295,6 +381,7 @@ void AuthenticatorImpl::doneWithStatus(const Status& status) {
     callback_ = nullptr;
     return;
   }
+
   startVerify();
 }
 

@@ -4,7 +4,7 @@
 
 #include "envoy/common/platform.h"
 
-#include "common/common/hex.h"
+#include "source/common/common/hex.h"
 
 #include "nghttp2/nghttp2.h"
 
@@ -12,19 +12,6 @@ namespace {
 
 // Converts stream ID to the network byte order. Supports all values in the range [0, 2^30).
 uint32_t makeNetworkOrderStreamId(uint32_t stream_id) { return htonl(stream_id); }
-
-// All this templatized stuff is for the typesafe constexpr bitwise ORing of the "enum class" values
-template <typename First, typename... Rest> struct FirstArgType {
-  using type = First; // NOLINT(readability-identifier-naming)
-};
-
-template <typename Flag> constexpr uint8_t orFlags(Flag flag) { return static_cast<uint8_t>(flag); }
-
-template <typename Flag, typename... Flags> constexpr uint8_t orFlags(Flag first, Flags... rest) {
-  static_assert(std::is_same<Flag, typename FirstArgType<Flags...>::type>::value,
-                "All flag types must be the same!");
-  return static_cast<uint8_t>(first) | orFlags(rest...);
-}
 
 } // namespace
 
@@ -139,8 +126,22 @@ Http2Frame Http2Frame::makePingFrame(absl::string_view data) {
 }
 
 Http2Frame Http2Frame::makeEmptySettingsFrame(SettingsFlags flags) {
+  return makeSettingsFrame(flags, {});
+}
+
+Http2Frame Http2Frame::makeSettingsFrame(SettingsFlags flags,
+                                         std::list<std::pair<uint16_t, uint32_t>> settings) {
   Http2Frame frame;
   frame.buildHeader(Type::Settings, 0, static_cast<uint8_t>(flags));
+  for (auto& item : settings) {
+    frame.data_.push_back((item.first >> 8) & 0xff);
+    frame.data_.push_back(item.first & 0xff);
+    frame.data_.push_back((item.second >> 24) & 0xff);
+    frame.data_.push_back((item.second >> 16) & 0xff);
+    frame.data_.push_back((item.second >> 8) & 0xff);
+    frame.data_.push_back(item.second & 0xff);
+  }
+  frame.setPayloadSize(6 * settings.size());
   return frame;
 }
 
@@ -160,13 +161,11 @@ Http2Frame Http2Frame::makeHeadersFrameNoStatus(uint32_t stream_index) {
   return frame;
 }
 
-Http2Frame Http2Frame::makeHeadersFrameWithStatus(std::string status, uint32_t stream_index) {
+Http2Frame Http2Frame::makeHeadersFrameWithStatus(std::string status, uint32_t stream_index,
+                                                  HeadersFlags flags) {
   Http2Frame frame;
-  frame.buildHeader(
-      Type::Headers, 0,
-      orFlags(HeadersFlags::EndStream,
-              HeadersFlags::EndHeaders), // TODO: Support not hardcoding these two flags
-      makeNetworkOrderStreamId(stream_index));
+  frame.buildHeader(Type::Headers, 0, static_cast<uint8_t>(flags),
+                    makeNetworkOrderStreamId(stream_index));
   if (status == "200") {
     frame.appendStaticHeader(StaticHeaderIndex::Status200);
   } else if (status == "204") {
@@ -263,7 +262,7 @@ Http2Frame Http2Frame::makeWindowUpdateFrame(uint32_t stream_index, uint32_t inc
 
 // Note: encoder in codebase persists multiple maps, with each map representing an individual frame.
 Http2Frame Http2Frame::makeMetadataFrameFromMetadataMap(uint32_t stream_index,
-                                                        MetadataMap& metadata_map,
+                                                        const MetadataMap& metadata_map,
                                                         MetadataFlags flags) {
   const int numberOfNameValuePairs = metadata_map.size();
   absl::FixedArray<nghttp2_nv> nameValues(numberOfNameValuePairs);
@@ -317,7 +316,17 @@ Http2Frame Http2Frame::makeMalformedRequestWithZerolenHeader(uint32_t stream_ind
   frame.appendStaticHeader(StaticHeaderIndex::MethodGet);
   frame.appendStaticHeader(StaticHeaderIndex::SchemeHttps);
   frame.appendHeaderWithoutIndexing(StaticHeaderIndex::Path, path);
-  frame.appendHeaderWithoutIndexing(StaticHeaderIndex::Host, host);
+  frame.appendHeaderWithoutIndexing(StaticHeaderIndex::Authority, host);
+  frame.appendEmptyHeader();
+  frame.adjustPayloadSize();
+  return frame;
+}
+
+Http2Frame Http2Frame::makeMalformedResponseWithZerolenHeader(uint32_t stream_index) {
+  Http2Frame frame;
+  frame.buildHeader(Type::Headers, 0, orFlags(HeadersFlags::EndStream, HeadersFlags::EndHeaders),
+                    makeNetworkOrderStreamId(stream_index));
+  frame.appendStaticHeader(StaticHeaderIndex::Status200);
   frame.appendEmptyHeader();
   frame.adjustPayloadSize();
   return frame;
@@ -331,7 +340,7 @@ Http2Frame Http2Frame::makeRequest(uint32_t stream_index, absl::string_view host
   frame.appendStaticHeader(StaticHeaderIndex::MethodGet);
   frame.appendStaticHeader(StaticHeaderIndex::SchemeHttps);
   frame.appendHeaderWithoutIndexing(StaticHeaderIndex::Path, path);
-  frame.appendHeaderWithoutIndexing(StaticHeaderIndex::Host, host);
+  frame.appendHeaderWithoutIndexing(StaticHeaderIndex::Authority, host);
   frame.adjustPayloadSize();
   return frame;
 }
@@ -355,7 +364,7 @@ Http2Frame Http2Frame::makePostRequest(uint32_t stream_index, absl::string_view 
   frame.appendStaticHeader(StaticHeaderIndex::MethodPost);
   frame.appendStaticHeader(StaticHeaderIndex::SchemeHttps);
   frame.appendHeaderWithoutIndexing(StaticHeaderIndex::Path, path);
-  frame.appendHeaderWithoutIndexing(StaticHeaderIndex::Host, host);
+  frame.appendHeaderWithoutIndexing(StaticHeaderIndex::Authority, host);
   frame.adjustPayloadSize();
   return frame;
 }

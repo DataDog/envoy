@@ -10,6 +10,8 @@ export PPROF_PATH=/thirdparty_build/bin/pprof
 [ -z "${ENVOY_SRCDIR}" ] && export ENVOY_SRCDIR=/source
 [ -z "${ENVOY_BUILD_TARGET}" ] && export ENVOY_BUILD_TARGET=//source/exe:envoy-static
 [ -z "${ENVOY_BUILD_DEBUG_INFORMATION}" ] && export ENVOY_BUILD_DEBUG_INFORMATION=//source/exe:envoy-static.dwp
+[ -z "${ENVOY_CONTRIB_BUILD_TARGET}" ] && export ENVOY_CONTRIB_BUILD_TARGET=//contrib/exe:envoy-static
+[ -z "${ENVOY_CONTRIB_BUILD_DEBUG_INFORMATION}" ] && export ENVOY_CONTRIB_BUILD_DEBUG_INFORMATION=//contrib/exe:envoy-static.dwp
 [ -z "${ENVOY_BUILD_ARCH}" ] && {
     ENVOY_BUILD_ARCH=$(uname -m)
     export ENVOY_BUILD_ARCH
@@ -28,13 +30,16 @@ function setup_gcc_toolchain() {
     echo "gcc toolchain doesn't support ${ENVOY_STDLIB}."
     exit 1
   fi
+
+  BAZEL_BUILD_OPTIONS+=("--config=gcc")
+
   if [[ -z "${ENVOY_RBE}" ]]; then
     export CC=gcc
     export CXX=g++
     export BAZEL_COMPILER=gcc
     echo "$CC/$CXX toolchain configured"
   else
-    BAZEL_BUILD_OPTIONS=("--config=remote-gcc" "${BAZEL_BUILD_OPTIONS[@]}")
+    BAZEL_BUILD_OPTIONS+=("--config=remote-gcc")
   fi
 }
 
@@ -42,15 +47,15 @@ function setup_clang_toolchain() {
   ENVOY_STDLIB="${ENVOY_STDLIB:-libc++}"
   if [[ -z "${ENVOY_RBE}" ]]; then
     if [[ "${ENVOY_STDLIB}" == "libc++" ]]; then
-      BAZEL_BUILD_OPTIONS=("--config=libc++" "${BAZEL_BUILD_OPTIONS[@]}")
+      BAZEL_BUILD_OPTIONS+=("--config=libc++")
     else
-      BAZEL_BUILD_OPTIONS=("--config=clang" "${BAZEL_BUILD_OPTIONS[@]}")
+      BAZEL_BUILD_OPTIONS+=("--config=clang")
     fi
   else
     if [[ "${ENVOY_STDLIB}" == "libc++" ]]; then
-      BAZEL_BUILD_OPTIONS=("--config=remote-clang-libc++" "${BAZEL_BUILD_OPTIONS[@]}")
+      BAZEL_BUILD_OPTIONS+=("--config=remote-clang-libc++")
     else
-      BAZEL_BUILD_OPTIONS=("--config=remote-clang" "${BAZEL_BUILD_OPTIONS[@]}")
+      BAZEL_BUILD_OPTIONS+=("--config=remote-clang")
     fi
   fi
   echo "clang toolchain with ${ENVOY_STDLIB} configured"
@@ -64,8 +69,9 @@ then
 fi
 
 # Environment setup.
-export TEST_TMPDIR=${BUILD_DIR}/tmp
-export PATH=/opt/llvm/bin:${PATH}
+export TEST_TMPDIR="${TEST_TMPDIR:-$BUILD_DIR/tmp}"
+export LLVM_ROOT="${LLVM_ROOT:-/opt/llvm}"
+export PATH=${LLVM_ROOT}/bin:${PATH}
 export CLANG_FORMAT="${CLANG_FORMAT:-clang-format}"
 
 if [[ -f "/etc/redhat-release" ]]; then
@@ -81,31 +87,28 @@ function cleanup() {
 cleanup
 trap cleanup EXIT
 
-export LLVM_ROOT="${LLVM_ROOT:-/opt/llvm}"
 "$(dirname "$0")"/../bazel/setup_clang.sh "${LLVM_ROOT}"
 
 [[ "${BUILD_REASON}" != "PullRequest" ]] && BAZEL_EXTRA_TEST_OPTIONS+=("--nocache_test_results")
 
-# TODO(phlax): deprecate/remove this - i believe it was made redundant here:
-#   https://github.com/envoyproxy/envoy/commit/3ebedeb708a23062332a6fcdf33b462b7070adba#diff-2fa22a1337effee365a51e6844be0ab3
-export BAZEL_QUERY_OPTIONS="${BAZEL_OPTIONS[*]}"
 # Use https://docs.bazel.build/versions/master/command-line-reference.html#flag--experimental_repository_cache_hardlinks
 # to save disk space.
 BAZEL_BUILD_OPTIONS=(
   "${BAZEL_OPTIONS[@]}"
   "--verbose_failures"
-  "--show_task_finish"
   "--experimental_generate_json_trace_profile"
   "--test_output=errors"
+  "--noshow_progress"
+  "--noshow_loading_progress"
   "--repository_cache=${BUILD_DIR}/repository_cache"
   "--experimental_repository_cache_hardlinks"
+  "--action_env=CLANG_FORMAT"
   "${BAZEL_BUILD_EXTRA_OPTIONS[@]}"
   "${BAZEL_EXTRA_TEST_OPTIONS[@]}")
 
 [[ "${ENVOY_BUILD_ARCH}" == "aarch64" ]] && BAZEL_BUILD_OPTIONS+=(
-  "--define" "wasm=disabled"
-	"--flaky_test_attempts=2"
-	"--test_env=HEAPCHECK=")
+  "--flaky_test_attempts=2"
+  "--test_env=HEAPCHECK=")
 
 [[ "${BAZEL_EXPUNGE}" == "1" ]] && bazel clean --expunge
 

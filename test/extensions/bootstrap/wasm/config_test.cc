@@ -2,10 +2,10 @@
 #include "envoy/extensions/wasm/v3/wasm.pb.validate.h"
 #include "envoy/registry/registry.h"
 
-#include "common/stats/isolated_store_impl.h"
+#include "source/common/stats/isolated_store_impl.h"
+#include "source/extensions/bootstrap/wasm/config.h"
 
-#include "extensions/bootstrap/wasm/config.h"
-
+#include "test/extensions/common/wasm/wasm_runtime.h"
 #include "test/mocks/event/mocks.h"
 #include "test/mocks/server/mocks.h"
 #include "test/mocks/thread_local/mocks.h"
@@ -21,12 +21,12 @@ namespace Wasm {
 
 using Extensions::Bootstrap::Wasm::WasmServicePtr;
 
-class WasmFactoryTest : public testing::TestWithParam<std::string> {
+class WasmFactoryTest : public testing::TestWithParam<std::tuple<std::string, std::string>> {
 protected:
   WasmFactoryTest() {
     config_.mutable_config()->mutable_vm_config()->set_runtime(
-        absl::StrCat("envoy.wasm.runtime.", GetParam()));
-    if (GetParam() != "null") {
+        absl::StrCat("envoy.wasm.runtime.", std::get<0>(GetParam())));
+    if (std::get<0>(GetParam()) != "null") {
       config_.mutable_config()->mutable_vm_config()->mutable_code()->mutable_local()->set_filename(
           TestEnvironment::substitute(
               "{{ test_rundir }}/test/extensions/bootstrap/wasm/test_data/start_cpp.wasm"));
@@ -52,6 +52,7 @@ protected:
     EXPECT_CALL(context_, lifecycleNotifier())
         .WillRepeatedly(testing::ReturnRef(lifecycle_notifier_));
     extension_ = factory->createBootstrapExtension(config, context_);
+    extension_->onServerInitialized();
     static_cast<Bootstrap::Wasm::WasmServiceExtension*>(extension_.get())->wasmService();
     EXPECT_CALL(init_watcher_, ready());
     init_manager_.initialize(init_watcher_);
@@ -67,17 +68,9 @@ protected:
   Server::BootstrapExtensionPtr extension_;
 };
 
-// NB: this is required by VC++ which can not handle the use of macros in the macro definitions
-// used by INSTANTIATE_TEST_SUITE_P.
-auto testing_values = testing::Values(
-#if defined(ENVOY_WASM_V8)
-    "v8",
-#endif
-#if defined(ENVOY_WASM_WAVM)
-    "wavm",
-#endif
-    "null");
-INSTANTIATE_TEST_SUITE_P(Runtimes, WasmFactoryTest, testing_values);
+INSTANTIATE_TEST_SUITE_P(Runtimes, WasmFactoryTest,
+                         Envoy::Extensions::Common::Wasm::runtime_and_cpp_values,
+                         Envoy::Extensions::Common::Wasm::wasmTestParamsToString);
 
 TEST_P(WasmFactoryTest, CreateWasmFromWasm) {
   auto factory = std::make_unique<Bootstrap::Wasm::WasmFactory>();
@@ -86,6 +79,9 @@ TEST_P(WasmFactoryTest, CreateWasmFromWasm) {
   initializeWithConfig(config_);
 
   EXPECT_NE(extension_, nullptr);
+
+  // Check if the custom stat namespace is registered during the initialization.
+  EXPECT_TRUE(api_->customStatNamespaces().registered("wasmcustom"));
 }
 
 TEST_P(WasmFactoryTest, CreateWasmFromWasmPerThread) {
@@ -98,7 +94,7 @@ TEST_P(WasmFactoryTest, CreateWasmFromWasmPerThread) {
 }
 
 TEST_P(WasmFactoryTest, MissingImport) {
-  if (GetParam() == "null") {
+  if (std::get<0>(GetParam()) == "null") {
     return;
   }
   config_.mutable_config()->mutable_vm_config()->mutable_code()->mutable_local()->set_filename(
@@ -109,11 +105,12 @@ TEST_P(WasmFactoryTest, MissingImport) {
 }
 
 TEST_P(WasmFactoryTest, UnspecifiedRuntime) {
+  if (std::get<0>(GetParam()) == "null") {
+    return;
+  }
   config_.mutable_config()->mutable_vm_config()->set_runtime("");
 
-  EXPECT_THROW_WITH_REGEX(
-      initializeWithConfig(config_), EnvoyException,
-      "Proto constraint validation failed \\(WasmServiceValidationError\\.Config");
+  EXPECT_NO_THROW(initializeWithConfig(config_));
 }
 
 TEST_P(WasmFactoryTest, UnknownRuntime) {

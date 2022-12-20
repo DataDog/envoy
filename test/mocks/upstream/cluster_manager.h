@@ -10,6 +10,7 @@
 #include "cluster_manager_factory.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "od_cds_api_handle.h"
 #include "thread_local_cluster.h"
 
 namespace Envoy {
@@ -26,13 +27,12 @@ public:
     return ClusterUpdateCallbacksHandlePtr{addThreadLocalClusterUpdateCallbacks_(callbacks)};
   }
 
-  Host::CreateConnectionData tcpConnForCluster(const std::string& cluster,
-                                               LoadBalancerContext* context) override {
-    MockHost::MockCreateConnectionData data = tcpConnForCluster_(cluster, context);
-    return {Network::ClientConnectionPtr{data.connection_}, data.host_description_};
-  }
-
   ClusterManagerFactory& clusterManagerFactory() override { return cluster_manager_factory_; }
+
+  void initializeClusters(const std::vector<std::string>& active_cluster_names,
+                          const std::vector<std::string>& warming_cluster_names);
+
+  void initializeThreadLocalClusters(const std::vector<std::string>& cluster_names);
 
   // Upstream::ClusterManager
   MOCK_METHOD(bool, addOrUpdateCluster,
@@ -42,18 +42,10 @@ public:
   MOCK_METHOD(void, setInitializedCb, (InitializationCompleteCallback));
   MOCK_METHOD(void, initializeSecondaryClusters,
               (const envoy::config::bootstrap::v3::Bootstrap& bootstrap));
-  MOCK_METHOD(ClusterInfoMap, clusters, ());
+  MOCK_METHOD(ClusterInfoMaps, clusters, (), (const));
+
   MOCK_METHOD(const ClusterSet&, primaryClusters, ());
-  MOCK_METHOD(ThreadLocalCluster*, get, (absl::string_view cluster));
-  MOCK_METHOD(Http::ConnectionPool::Instance*, httpConnPoolForCluster,
-              (const std::string& cluster, ResourcePriority priority,
-               absl::optional<Http::Protocol> downstream_protocol, LoadBalancerContext* context));
-  MOCK_METHOD(Tcp::ConnectionPool::Instance*, tcpConnPoolForCluster,
-              (const std::string& cluster, ResourcePriority priority,
-               LoadBalancerContext* context));
-  MOCK_METHOD(MockHost::MockCreateConnectionData, tcpConnForCluster_,
-              (const std::string& cluster, LoadBalancerContext* context));
-  MOCK_METHOD(Http::AsyncClient&, httpAsyncClientForCluster, (const std::string& cluster));
+  MOCK_METHOD(ThreadLocalCluster*, getThreadLocalCluster, (absl::string_view cluster));
   MOCK_METHOD(bool, removeCluster, (const std::string& cluster));
   MOCK_METHOD(void, shutdown, ());
   MOCK_METHOD(const envoy::config::core::v3::BindConfig&, bindConfig, (), (const));
@@ -64,10 +56,35 @@ public:
   MOCK_METHOD(ClusterUpdateCallbacksHandle*, addThreadLocalClusterUpdateCallbacks_,
               (ClusterUpdateCallbacks & callbacks));
   MOCK_METHOD(Config::SubscriptionFactory&, subscriptionFactory, ());
+  const ClusterTrafficStatNames& clusterStatNames() const override { return cluster_stat_names_; }
+  const ClusterConfigUpdateStatNames& clusterConfigUpdateStatNames() const override {
+    return cluster_config_update_stat_names_;
+  }
+  const ClusterEndpointStatNames& clusterEndpointStatNames() const override {
+    return cluster_endpoint_stat_names_;
+  }
+  const ClusterLbStatNames& clusterLbStatNames() const override { return cluster_lb_stat_names_; }
+  const ClusterLoadReportStatNames& clusterLoadReportStatNames() const override {
+    return cluster_load_report_stat_names_;
+  }
+  const ClusterCircuitBreakersStatNames& clusterCircuitBreakersStatNames() const override {
+    return cluster_circuit_breakers_stat_names_;
+  }
+  const ClusterRequestResponseSizeStatNames& clusterRequestResponseSizeStatNames() const override {
+    return cluster_request_response_size_stat_names_;
+  }
+  const ClusterTimeoutBudgetStatNames& clusterTimeoutBudgetStatNames() const override {
+    return cluster_timeout_budget_stat_names_;
+  }
+  MOCK_METHOD(void, drainConnections,
+              (const std::string& cluster, DrainConnectionsHostPredicate predicate));
+  MOCK_METHOD(void, drainConnections, (DrainConnectionsHostPredicate predicate));
+  MOCK_METHOD(void, checkActiveStaticCluster, (const std::string& cluster));
+  MOCK_METHOD(OdCdsApiHandlePtr, allocateOdCdsApi,
+              (const envoy::config::core::v3::ConfigSource& odcds_config,
+               OptRef<xds::core::v3::ResourceLocator> odcds_resources_locator,
+               ProtobufMessage::ValidationVisitor& validation_visitor));
 
-  NiceMock<Http::ConnectionPool::MockInstance> conn_pool_;
-  NiceMock<Http::MockAsyncClient> async_client_;
-  NiceMock<Tcp::ConnectionPool::MockInstance> tcp_conn_pool_;
   NiceMock<MockThreadLocalCluster> thread_local_cluster_;
   envoy::config::core::v3::BindConfig bind_config_;
   std::shared_ptr<NiceMock<Config::MockGrpcMux>> ads_mux_;
@@ -75,7 +92,17 @@ public:
   absl::optional<std::string> local_cluster_name_;
   NiceMock<MockClusterManagerFactory> cluster_manager_factory_;
   NiceMock<Config::MockSubscriptionFactory> subscription_factory_;
+  absl::flat_hash_map<std::string, std::unique_ptr<MockCluster>> active_clusters_;
+  absl::flat_hash_map<std::string, std::unique_ptr<MockCluster>> warming_clusters_;
+  Stats::TestUtil::TestSymbolTable symbol_table_;
+  ClusterTrafficStatNames cluster_stat_names_;
+  ClusterConfigUpdateStatNames cluster_config_update_stat_names_;
+  ClusterLbStatNames cluster_lb_stat_names_;
+  ClusterEndpointStatNames cluster_endpoint_stat_names_;
+  ClusterLoadReportStatNames cluster_load_report_stat_names_;
+  ClusterCircuitBreakersStatNames cluster_circuit_breakers_stat_names_;
+  ClusterRequestResponseSizeStatNames cluster_request_response_size_stat_names_;
+  ClusterTimeoutBudgetStatNames cluster_timeout_budget_stat_names_;
 };
 } // namespace Upstream
-
 } // namespace Envoy

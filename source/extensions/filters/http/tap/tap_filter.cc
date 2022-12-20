@@ -1,4 +1,4 @@
-#include "extensions/filters/http/tap/tap_filter.h"
+#include "source/extensions/filters/http/tap/tap_filter.h"
 
 #include "envoy/extensions/filters/http/tap/v3/tap.pb.h"
 
@@ -10,7 +10,7 @@ namespace TapFilter {
 FilterConfigImpl::FilterConfigImpl(
     const envoy::extensions::filters::http::tap::v3::Tap& proto_config,
     const std::string& stats_prefix, Common::Tap::TapConfigFactoryPtr&& config_factory,
-    Stats::Scope& scope, Server::Admin& admin, Singleton::Manager& singleton_manager,
+    Stats::Scope& scope, OptRef<Server::Admin> admin, Singleton::Manager& singleton_manager,
     ThreadLocal::SlotAllocator& tls, Event::Dispatcher& main_thread_dispatcher)
     : ExtensionConfigBase(proto_config.common_config(), std::move(config_factory), admin,
                           singleton_manager, tls, main_thread_dispatcher),

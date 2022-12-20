@@ -1,13 +1,15 @@
+#include <memory>
 #include <vector>
 
 #include "envoy/server/filter_config.h"
 
-#include "server/config_validation/server.h"
+#include "source/server/config_validation/server.h"
 
 #include "test/integration/server.h"
 #include "test/mocks/server/options.h"
 #include "test/mocks/stats/mocks.h"
 #include "test/test_common/environment.h"
+#include "test/test_common/network_utility.h"
 #include "test/test_common/registry.h"
 #include "test/test_common/test_time.h"
 
@@ -79,33 +81,6 @@ public:
     }
     return files;
   }
-
-  class TestConfigFactory : public Configuration::NamedNetworkFilterConfigFactory {
-  public:
-    std::string name() const override { return "envoy.filters.network.test"; }
-
-    Network::FilterFactoryCb createFilterFactoryFromProto(const Protobuf::Message&,
-                                                          Configuration::FactoryContext&) override {
-      // Validate that the validation server loaded the runtime data and installed the singleton.
-      auto* runtime = Runtime::LoaderSingleton::getExisting();
-      if (runtime == nullptr) {
-        throw EnvoyException("Runtime::LoaderSingleton == nullptr");
-      }
-
-      if (!runtime->threadsafeSnapshot()->getBoolean("test.runtime.loaded", false)) {
-        throw EnvoyException(
-            "Found Runtime::LoaderSingleton, got wrong value for test.runtime.loaded");
-      }
-
-      return [](Network::FilterManager&) {};
-    }
-
-    ProtobufTypes::MessagePtr createEmptyConfigProto() override {
-      return ProtobufTypes::MessagePtr{new ProtobufWkt::Struct()};
-    }
-
-    bool isTerminalFilter() override { return true; }
-  };
 };
 
 TEST_P(ValidationServerTest, Validate) {
@@ -125,6 +100,37 @@ TEST_P(ValidationServerTest, NoopLifecycleNotifier) {
   server.registerCallback(ServerLifecycleNotifier::Stage::ShutdownExit, [] { FAIL(); });
   server.registerCallback(ServerLifecycleNotifier::Stage::ShutdownExit,
                           [](Event::PostCb) { FAIL(); });
+  server.setSinkPredicates(std::make_unique<testing::NiceMock<Stats::MockSinkPredicates>>());
+  server.shutdown();
+}
+
+// A test to increase coverage of dummy methods (naively implemented methods
+// needed for interface implementation).
+TEST_P(ValidationServerTest, DummyMethodsTest) {
+  // Setup the server instance.
+  Thread::MutexBasicLockable access_log_lock;
+  Stats::IsolatedStoreImpl stats_store;
+  DangerousDeprecatedTestTime time_system;
+  ValidationInstance server(options_, time_system.timeSystem(),
+                            Network::Address::InstanceConstSharedPtr(), stats_store,
+                            access_log_lock, component_factory_, Thread::threadFactoryForTest(),
+                            Filesystem::fileSystemForTest());
+
+  // Execute dummy methods.
+  server.drainListeners();
+  server.failHealthcheck(true);
+  server.lifecycleNotifier();
+  server.secretManager();
+  EXPECT_FALSE(server.isShutdown());
+  EXPECT_FALSE(server.healthCheckFailed());
+  server.grpcContext();
+  EXPECT_FALSE(server.processContext().has_value());
+  server.timeSource();
+  server.mutexTracer();
+  server.flushStats();
+  server.statsConfig();
+  server.transportSocketFactoryContext();
+  server.shutdownAdmin();
   server.shutdown();
 }
 
@@ -134,11 +140,12 @@ TEST_P(ValidationServerTest, NoopLifecycleNotifier) {
 // as-is. (Note, /dev/stdout as an access log file is invalid on Windows, no equivalent /dev/
 // exists.)
 
-auto testing_values = ::testing::Values("front-proxy_front-envoy.yaml", "envoyproxy_io_proxy.yaml",
-#ifndef WIN32
-                                        "grpc-bridge_server_envoy-proxy.yaml",
+auto testing_values =
+    ::testing::Values("front-proxy_front-envoy.yaml", "envoyproxy_io_proxy.yaml",
+#if defined(WIN32) && defined(SO_ORIGINAL_DST)
+                      "configs_original-dst-cluster_proxy_config.yaml",
 #endif
-                                        "front-proxy_service-envoy.yaml");
+                      "grpc-bridge_server_envoy-proxy.yaml", "front-proxy_service-envoy.yaml");
 
 INSTANTIATE_TEST_SUITE_P(ValidConfigs, ValidationServerTest, testing_values);
 
@@ -155,15 +162,33 @@ INSTANTIATE_TEST_SUITE_P(AllConfigs, ValidationServerTest_1,
                          ::testing::ValuesIn(ValidationServerTest_1::getAllConfigFiles()));
 
 TEST_P(RuntimeFeatureValidationServerTest, ValidRuntimeLoaderSingleton) {
-  TestConfigFactory factory;
-  Registry::InjectFactory<Configuration::NamedNetworkFilterConfigFactory> registration(factory);
+  Thread::MutexBasicLockable access_log_lock;
+  Stats::IsolatedStoreImpl stats_store;
+  DangerousDeprecatedTestTime time_system;
+  ValidationInstance server(options_, time_system.timeSystem(),
+                            Network::Address::InstanceConstSharedPtr(), stats_store,
+                            access_log_lock, component_factory_, Thread::threadFactoryForTest(),
+                            Filesystem::fileSystemForTest());
+  EXPECT_TRUE(server.runtime().snapshot().getBoolean("test.runtime.loaded", false));
+  server.registerCallback(ServerLifecycleNotifier::Stage::ShutdownExit, [] { FAIL(); });
+  server.registerCallback(ServerLifecycleNotifier::Stage::ShutdownExit,
+                          [](Event::PostCb) { FAIL(); });
+  server.setSinkPredicates(std::make_unique<testing::NiceMock<Stats::MockSinkPredicates>>());
+  server.shutdown();
+}
 
-  auto local_address = Network::Utility::getLocalAddress(options_.localAddressIpVersion());
+// Test the admin handler stubs used in validation
+TEST(ValidationTest, Admin) {
+  auto local_address =
+      Network::Test::getCanonicalLoopbackAddress(TestEnvironment::getIpVersionsForTest()[0]);
 
-  // If this fails, it's likely because TestConfigFactory threw an exception related to the
-  // runtime loader.
-  ASSERT_TRUE(validateConfig(options_, local_address, component_factory_,
-                             Thread::threadFactoryForTest(), Filesystem::fileSystemForTest()));
+  ValidationAdmin admin(local_address);
+  std::string empty = "";
+  Server::Admin::HandlerCb cb;
+  EXPECT_TRUE(admin.addHandler(empty, empty, cb, false, false));
+  EXPECT_TRUE(admin.removeHandler(empty));
+  EXPECT_EQ(1, admin.concurrency());
+  admin.socket();
 }
 
 INSTANTIATE_TEST_SUITE_P(

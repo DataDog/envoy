@@ -11,12 +11,12 @@ envoy_package()
 envoy_cc_test(
     name = "dispatcher_impl_test",
     srcs = ["dispatcher_impl_test.cc"],
-    tags = ["fails_on_windows"],
     deps = [
         "//source/common/api:api_lib",
         "//source/common/event:deferred_task",
         "//source/common/event:dispatcher_includes",
         "//source/common/event:dispatcher_lib",
+        "//source/common/network:address_lib",
         "//source/common/stats:isolated_store_lib",
         "//test/mocks:common_lib",
         "//test/mocks/server:watch_dog_mocks",
@@ -30,9 +30,8 @@ envoy_cc_test(
 envoy_cc_test(
     name = "file_event_impl_test",
     srcs = ["file_event_impl_test.cc"],
-    tags = ["fails_on_windows"],
     deps = [
-        "//include/envoy/event:file_event_interface",
+        "//envoy/event:file_event_interface",
         "//source/common/event:dispatcher_includes",
         "//source/common/event:dispatcher_lib",
         "//source/common/stats:isolated_store_lib",

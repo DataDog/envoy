@@ -1,8 +1,9 @@
-#include "extensions/filters/common/expr/context.h"
+#include "source/extensions/filters/common/expr/context.h"
 
-#include "common/grpc/common.h"
-#include "common/http/header_map_impl.h"
-#include "common/http/utility.h"
+#include "source/common/grpc/common.h"
+#include "source/common/http/header_map_impl.h"
+#include "source/common/http/utility.h"
+#include "source/extensions/filters/common/expr/cel_state.h"
 
 #include "absl/strings/numbers.h"
 #include "absl/time/time.h"
@@ -61,6 +62,10 @@ absl::optional<CelValue> extractSslInfo(const Ssl::ConnectionInfo& ssl_info,
   } else if (value == DNSSanPeerCertificate) {
     if (!ssl_info.dnsSansPeerCertificate().empty()) {
       return CelValue::CreateString(&ssl_info.dnsSansPeerCertificate()[0]);
+    }
+  } else if (value == SHA256PeerCertificateDigest) {
+    if (!ssl_info.sha256PeerCertificateDigest().empty()) {
+      return CelValue::CreateString(&ssl_info.sha256PeerCertificateDigest());
     }
   }
   return {};
@@ -127,6 +132,15 @@ absl::optional<CelValue> RequestWrapper::operator[](CelValue key) const {
       return convertHeaderEntry(headers_.value_->RequestId());
     } else if (value == UserAgent) {
       return convertHeaderEntry(headers_.value_->UserAgent());
+    } else if (value == Query) {
+      absl::string_view path = headers_.value_->getPathValue();
+      auto query_offset = path.find('?');
+      if (query_offset == absl::string_view::npos) {
+        return CelValue::CreateStringView(absl::string_view());
+      }
+      path = path.substr(query_offset + 1);
+      auto fragment_offset = path.find('#');
+      return CelValue::CreateStringView(path.substr(0, fragment_offset));
     }
   }
   return {};
@@ -180,12 +194,13 @@ absl::optional<CelValue> ConnectionWrapper::operator[](CelValue key) const {
   }
   auto value = key.StringOrDie().value();
   if (value == MTLS) {
-    return CelValue::CreateBool(info_.downstreamSslConnection() != nullptr &&
-                                info_.downstreamSslConnection()->peerCertificatePresented());
+    return CelValue::CreateBool(
+        info_.downstreamAddressProvider().sslConnection() != nullptr &&
+        info_.downstreamAddressProvider().sslConnection()->peerCertificatePresented());
   } else if (value == RequestedServerName) {
-    return CelValue::CreateString(&info_.requestedServerName());
+    return CelValue::CreateStringView(info_.downstreamAddressProvider().requestedServerName());
   } else if (value == ID) {
-    auto id = info_.connectionID();
+    auto id = info_.downstreamAddressProvider().connectionID();
     if (id.has_value()) {
       return CelValue::CreateUint64(id.value());
     }
@@ -197,7 +212,7 @@ absl::optional<CelValue> ConnectionWrapper::operator[](CelValue key) const {
     return {};
   }
 
-  auto ssl_info = info_.downstreamSslConnection();
+  auto ssl_info = info_.downstreamAddressProvider().sslConnection();
   if (ssl_info != nullptr) {
     return extractSslInfo(*ssl_info, value);
   }
@@ -206,31 +221,32 @@ absl::optional<CelValue> ConnectionWrapper::operator[](CelValue key) const {
 }
 
 absl::optional<CelValue> UpstreamWrapper::operator[](CelValue key) const {
-  if (!key.IsString()) {
+  if (!key.IsString() || !info_.upstreamInfo().has_value()) {
     return {};
   }
   auto value = key.StringOrDie().value();
   if (value == Address) {
-    auto upstream_host = info_.upstreamHost();
+    auto upstream_host = info_.upstreamInfo().value().get().upstreamHost();
     if (upstream_host != nullptr && upstream_host->address() != nullptr) {
       return CelValue::CreateStringView(upstream_host->address()->asStringView());
     }
   } else if (value == Port) {
-    auto upstream_host = info_.upstreamHost();
+    auto upstream_host = info_.upstreamInfo().value().get().upstreamHost();
     if (upstream_host != nullptr && upstream_host->address() != nullptr &&
         upstream_host->address()->ip() != nullptr) {
       return CelValue::CreateInt64(upstream_host->address()->ip()->port());
     }
   } else if (value == UpstreamLocalAddress) {
-    auto upstream_local_address = info_.upstreamLocalAddress();
+    auto upstream_local_address = info_.upstreamInfo().value().get().upstreamLocalAddress();
     if (upstream_local_address != nullptr) {
       return CelValue::CreateStringView(upstream_local_address->asStringView());
     }
   } else if (value == UpstreamTransportFailureReason) {
-    return CelValue::CreateStringView(info_.upstreamTransportFailureReason());
+    return CelValue::CreateStringView(
+        info_.upstreamInfo().value().get().upstreamTransportFailureReason());
   }
 
-  auto ssl_info = info_.upstreamSslConnection();
+  auto ssl_info = info_.upstreamInfo().value().get().upstreamSslConnection();
   if (ssl_info != nullptr) {
     return extractSslInfo(*ssl_info, value);
   }
@@ -245,18 +261,22 @@ absl::optional<CelValue> PeerWrapper::operator[](CelValue key) const {
   auto value = key.StringOrDie().value();
   if (value == Address) {
     if (local_) {
-      return CelValue::CreateStringView(info_.downstreamLocalAddress()->asStringView());
+      return CelValue::CreateStringView(
+          info_.downstreamAddressProvider().localAddress()->asStringView());
     } else {
-      return CelValue::CreateStringView(info_.downstreamRemoteAddress()->asStringView());
+      return CelValue::CreateStringView(
+          info_.downstreamAddressProvider().remoteAddress()->asStringView());
     }
   } else if (value == Port) {
     if (local_) {
-      if (info_.downstreamLocalAddress()->ip() != nullptr) {
-        return CelValue::CreateInt64(info_.downstreamLocalAddress()->ip()->port());
+      if (info_.downstreamAddressProvider().localAddress()->ip() != nullptr) {
+        return CelValue::CreateInt64(
+            info_.downstreamAddressProvider().localAddress()->ip()->port());
       }
     } else {
-      if (info_.downstreamRemoteAddress()->ip() != nullptr) {
-        return CelValue::CreateInt64(info_.downstreamRemoteAddress()->ip()->port());
+      if (info_.downstreamAddressProvider().remoteAddress()->ip() != nullptr) {
+        return CelValue::CreateInt64(
+            info_.downstreamAddressProvider().remoteAddress()->ip()->port());
       }
     }
   }
@@ -269,12 +289,17 @@ absl::optional<CelValue> FilterStateWrapper::operator[](CelValue key) const {
     return {};
   }
   auto value = key.StringOrDie().value();
-  if (filter_state_.hasDataWithName(value)) {
-    const StreamInfo::FilterState::Object* object = filter_state_.getDataReadOnlyGeneric(value);
-    absl::optional<std::string> serialized = object->serializeAsString();
-    if (serialized.has_value()) {
-      std::string* out = ProtobufWkt::Arena::Create<std::string>(arena_, serialized.value());
-      return CelValue::CreateBytes(out);
+  if (const StreamInfo::FilterState::Object* object = filter_state_.getDataReadOnlyGeneric(value);
+      object != nullptr) {
+    const CelState* cel_state = dynamic_cast<const CelState*>(object);
+    if (cel_state) {
+      return cel_state->exprValue(arena_, false);
+    } else if (object != nullptr) {
+      absl::optional<std::string> serialized = object->serializeAsString();
+      if (serialized.has_value()) {
+        std::string* out = ProtobufWkt::Arena::Create<std::string>(arena_, serialized.value());
+        return CelValue::CreateBytes(out);
+      }
     }
   }
   return {};

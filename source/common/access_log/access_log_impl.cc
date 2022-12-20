@@ -1,4 +1,4 @@
-#include "common/access_log/access_log_impl.h"
+#include "source/common/access_log/access_log_impl.h"
 
 #include <cstdint>
 #include <string>
@@ -11,17 +11,17 @@
 #include "envoy/runtime/runtime.h"
 #include "envoy/upstream/upstream.h"
 
-#include "common/common/assert.h"
-#include "common/common/utility.h"
-#include "common/config/metadata.h"
-#include "common/config/utility.h"
-#include "common/http/header_map_impl.h"
-#include "common/http/header_utility.h"
-#include "common/http/headers.h"
-#include "common/http/utility.h"
-#include "common/protobuf/utility.h"
-#include "common/stream_info/utility.h"
-#include "common/tracing/http_tracer_impl.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/utility.h"
+#include "source/common/config/metadata.h"
+#include "source/common/config/utility.h"
+#include "source/common/http/header_map_impl.h"
+#include "source/common/http/header_utility.h"
+#include "source/common/http/headers.h"
+#include "source/common/http/utility.h"
+#include "source/common/protobuf/utility.h"
+#include "source/common/stream_info/utility.h"
+#include "source/common/tracing/http_tracer_impl.h"
 
 #include "absl/types/optional.h"
 
@@ -40,15 +40,16 @@ bool ComparisonFilter::compareAgainstValue(uint64_t lhs) const {
   }
 
   switch (config_.op()) {
+    PANIC_ON_PROTO_ENUM_SENTINEL_VALUES;
   case envoy::config::accesslog::v3::ComparisonFilter::GE:
     return lhs >= value;
   case envoy::config::accesslog::v3::ComparisonFilter::EQ:
     return lhs == value;
   case envoy::config::accesslog::v3::ComparisonFilter::LE:
     return lhs <= value;
-  default:
-    NOT_REACHED_GCOVR_EXCL_LINE;
   }
+  IS_ENVOY_BUG("unexpected comparison op enum");
+  return false;
 }
 
 FilterPtr FilterFactory::fromProto(const envoy::config::accesslog::v3::AccessLogFilter& config,
@@ -86,17 +87,17 @@ FilterPtr FilterFactory::fromProto(const envoy::config::accesslog::v3::AccessLog
           Config::Utility::getAndCheckFactory<ExtensionFilterFactory>(config.extension_filter());
       return factory.createFilter(config.extension_filter(), runtime, random);
     }
-  default:
-    NOT_REACHED_GCOVR_EXCL_LINE;
+  case envoy::config::accesslog::v3::AccessLogFilter::FilterSpecifierCase::FILTER_SPECIFIER_NOT_SET:
+    PANIC_DUE_TO_PROTO_UNSET;
   }
+  IS_ENVOY_BUG("unexpected filter specifier value");
+  return nullptr;
 }
 
 bool TraceableRequestFilter::evaluate(const StreamInfo::StreamInfo& info,
-                                      const Http::RequestHeaderMap& request_headers,
-                                      const Http::ResponseHeaderMap&,
+                                      const Http::RequestHeaderMap&, const Http::ResponseHeaderMap&,
                                       const Http::ResponseTrailerMap&) const {
-  Tracing::Decision decision = Tracing::HttpTracerUtility::isTracing(info, request_headers);
-
+  const Tracing::Decision decision = Tracing::HttpTracerUtility::shouldTraceRequest(info);
   return decision.traced && decision.reason == Tracing::Reason::ServiceForced;
 }
 
@@ -127,16 +128,23 @@ RuntimeFilter::RuntimeFilter(const envoy::config::accesslog::v3::RuntimeFilter& 
       use_independent_randomness_(config.use_independent_randomness()) {}
 
 bool RuntimeFilter::evaluate(const StreamInfo::StreamInfo& stream_info,
-                             const Http::RequestHeaderMap& request_headers,
-                             const Http::ResponseHeaderMap&,
+                             const Http::RequestHeaderMap&, const Http::ResponseHeaderMap&,
                              const Http::ResponseTrailerMap&) const {
-  auto rid_extension = stream_info.getRequestIDExtension();
+  // This code is verbose to avoid preallocating a random number that is not needed.
   uint64_t random_value;
-  if (use_independent_randomness_ ||
-      !rid_extension->modBy(
-          request_headers, random_value,
-          ProtobufPercentHelper::fractionalPercentDenominatorToInt(percent_.denominator()))) {
+  if (use_independent_randomness_) {
     random_value = random_.random();
+  } else if (!stream_info.getStreamIdProvider().has_value()) {
+    random_value = random_.random();
+  } else {
+    const auto rid_to_integer = stream_info.getStreamIdProvider()->toInteger();
+    if (!rid_to_integer.has_value()) {
+      random_value = random_.random();
+    } else {
+      random_value =
+          rid_to_integer.value() %
+          ProtobufPercentHelper::fractionalPercentDenominatorToInt(percent_.denominator());
+    }
   }
 
   return runtime_.snapshot().featureEnabled(
@@ -149,7 +157,10 @@ OperatorFilter::OperatorFilter(
     Runtime::Loader& runtime, Random::RandomGenerator& random,
     ProtobufMessage::ValidationVisitor& validation_visitor) {
   for (const auto& config : configs) {
-    filters_.emplace_back(FilterFactory::fromProto(config, runtime, random, validation_visitor));
+    auto filter = FilterFactory::fromProto(config, runtime, random, validation_visitor);
+    if (filter != nullptr) {
+      filters_.emplace_back(std::move(filter));
+    }
   }
 }
 
@@ -296,8 +307,11 @@ bool MetadataFilter::evaluate(const StreamInfo::StreamInfo& info, const Http::Re
   return default_match_;
 }
 
-InstanceSharedPtr AccessLogFactory::fromProto(const envoy::config::accesslog::v3::AccessLog& config,
-                                              Server::Configuration::FactoryContext& context) {
+namespace {
+
+template <typename FactoryContext>
+InstanceSharedPtr makeAccessLogInstance(const envoy::config::accesslog::v3::AccessLog& config,
+                                        FactoryContext& context) {
   FilterPtr filter;
   if (config.has_filter()) {
     filter = FilterFactory::fromProto(config.filter(), context.runtime(),
@@ -311,6 +325,20 @@ InstanceSharedPtr AccessLogFactory::fromProto(const envoy::config::accesslog::v3
       config, context.messageValidationVisitor(), factory);
 
   return factory.createAccessLogInstance(*message, std::move(filter), context);
+}
+
+} // namespace
+
+InstanceSharedPtr
+AccessLogFactory::fromProto(const envoy::config::accesslog::v3::AccessLog& config,
+                            Server::Configuration::ListenerAccessLogFactoryContext& context) {
+  return makeAccessLogInstance(config, context);
+}
+
+InstanceSharedPtr
+AccessLogFactory::fromProto(const envoy::config::accesslog::v3::AccessLog& config,
+                            Server::Configuration::CommonFactoryContext& context) {
+  return makeAccessLogInstance(config, context);
 }
 
 } // namespace AccessLog

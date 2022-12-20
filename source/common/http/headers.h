@@ -4,8 +4,8 @@
 
 #include "envoy/http/header_map.h"
 
-#include "common/singleton/const_singleton.h"
-#include "common/singleton/threadsafe_singleton.h"
+#include "source/common/singleton/const_singleton.h"
+#include "source/common/singleton/threadsafe_singleton.h"
 
 namespace Envoy {
 namespace Http {
@@ -52,6 +52,7 @@ class CustomHeaderValues {
 public:
   const LowerCaseString Accept{"accept"};
   const LowerCaseString AcceptEncoding{"accept-encoding"};
+  const LowerCaseString AccessControlRequestHeaders{"access-control-request-headers"};
   const LowerCaseString AccessControlRequestMethod{"access-control-request-method"};
   const LowerCaseString AccessControlAllowOrigin{"access-control-allow-origin"};
   const LowerCaseString AccessControlAllowHeaders{"access-control-allow-headers"};
@@ -59,13 +60,21 @@ public:
   const LowerCaseString AccessControlExposeHeaders{"access-control-expose-headers"};
   const LowerCaseString AccessControlMaxAge{"access-control-max-age"};
   const LowerCaseString AccessControlAllowCredentials{"access-control-allow-credentials"};
+  const LowerCaseString AccessControlRequestPrviateNetwork{
+      "access-control-request-private-network"};
+  const LowerCaseString AccessControlAllowPrviateNetwork{"access-control-allow-private-network"};
+  const LowerCaseString Age{"age"};
+  const LowerCaseString AltSvc{"alt-svc"};
   const LowerCaseString Authentication{"authentication"};
   const LowerCaseString Authorization{"authorization"};
   const LowerCaseString CacheControl{"cache-control"};
   const LowerCaseString CdnLoop{"cdn-loop"};
   const LowerCaseString ContentEncoding{"content-encoding"};
   const LowerCaseString Etag{"etag"};
+  const LowerCaseString Expires{"expires"};
   const LowerCaseString GrpcAcceptEncoding{"grpc-accept-encoding"};
+  const LowerCaseString GrpcEncoding{"grpc-encoding"};
+  const LowerCaseString GrpcMessageType{"grpc-message-type"};
   const LowerCaseString IfMatch{"if-match"};
   const LowerCaseString IfNoneMatch{"if-none-match"};
   const LowerCaseString IfModifiedSince{"if-modified-since"};
@@ -96,7 +105,9 @@ public:
   } CacheControlValues;
 
   struct {
+    const std::string Brotli{"br"};
     const std::string Gzip{"gzip"};
+    const std::string Zstd{"zstd"};
   } ContentEncodingValues;
 
   struct {
@@ -123,7 +134,6 @@ class HeaderValues {
 public:
   const char* prefix() const { return ThreadSafeSingleton<PrefixValue>::get().prefix(); }
 
-  const LowerCaseString Age{"age"};
   const LowerCaseString ProxyAuthenticate{"proxy-authenticate"};
   const LowerCaseString ProxyAuthorization{"proxy-authorization"};
   const LowerCaseString ClientTraceId{"x-client-trace-id"};
@@ -180,9 +190,10 @@ public:
   const LowerCaseString EnvoyUpstreamServiceTime{absl::StrCat(prefix(), "-upstream-service-time")};
   const LowerCaseString EnvoyUpstreamHealthCheckedCluster{
       absl::StrCat(prefix(), "-upstream-healthchecked-cluster")};
+  const LowerCaseString EnvoyUpstreamStreamDurationMs{
+      absl::StrCat(prefix(), "-upstream-stream-duration-ms")};
   const LowerCaseString EnvoyDecoratorOperation{absl::StrCat(prefix(), "-decorator-operation")};
   const LowerCaseString Expect{"expect"};
-  const LowerCaseString Expires{"expires"};
   const LowerCaseString ForwardedClientCert{"x-forwarded-client-cert"};
   const LowerCaseString ForwardedFor{"x-forwarded-for"};
   const LowerCaseString ForwardedHost{"x-forwarded-host"};
@@ -200,6 +211,7 @@ public:
   const LowerCaseString Path{":path"};
   const LowerCaseString Protocol{":protocol"};
   const LowerCaseString ProxyConnection{"proxy-connection"};
+  const LowerCaseString ProxyStatus{"proxy-status"};
   const LowerCaseString Range{"range"};
   const LowerCaseString RequestId{"x-request-id"};
   const LowerCaseString Scheme{":scheme"};
@@ -210,11 +222,11 @@ public:
   const LowerCaseString TE{"te"};
   const LowerCaseString Upgrade{"upgrade"};
   const LowerCaseString UserAgent{"user-agent"};
-  const LowerCaseString Vary{"vary"};
   const LowerCaseString Via{"via"};
   const LowerCaseString WWWAuthenticate{"www-authenticate"};
   const LowerCaseString XContentTypeOptions{"x-content-type-options"};
   const LowerCaseString XSquashDebug{"x-squash-debug"};
+  const LowerCaseString EarlyData{"early-data"};
 
   struct {
     const std::string Close{"close"};
@@ -269,6 +281,7 @@ public:
     const std::string RetriableStatusCodes{"retriable-status-codes"};
     const std::string RetriableHeaders{"retriable-headers"};
     const std::string Reset{"reset"};
+    const std::string Http3PostConnectFailure{"http3-post-connect-failure"};
   } EnvoyRetryOnValues;
 
   struct {
@@ -306,10 +319,13 @@ public:
   } SchemeValues;
 
   struct {
+    const std::string Brotli{"br"};
+    const std::string Compress{"compress"};
     const std::string Chunked{"chunked"};
     const std::string Deflate{"deflate"};
     const std::string Gzip{"gzip"};
     const std::string Identity{"identity"};
+    const std::string Zstd{"zstd"};
   } TransferEncodingValues;
 
   struct {

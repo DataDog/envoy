@@ -4,7 +4,7 @@
 #include "envoy/registry/registry.h"
 #include "envoy/server/filter_config.h"
 
-#include "extensions/filters/http/common/pass_through_filter.h"
+#include "source/extensions/filters/http/common/pass_through_filter.h"
 
 #include "test/extensions/filters/http/common/empty_http_filter_config.h"
 
@@ -43,9 +43,9 @@ public:
   }
 };
 
-class ModifyBuffferFilterConfig : public Extensions::HttpFilters::Common::EmptyHttpFilterConfig {
+class ModifyBufferFilterConfig : public Extensions::HttpFilters::Common::EmptyHttpFilterConfig {
 public:
-  ModifyBuffferFilterConfig() : EmptyHttpFilterConfig("modify-buffer-filter") {}
+  ModifyBufferFilterConfig() : EmptyHttpFilterConfig("modify-buffer-filter") {}
 
   Http::FilterFactoryCb createFilter(const std::string&,
                                      Server::Configuration::FactoryContext&) override {
@@ -56,7 +56,7 @@ public:
 };
 
 // perform static registration
-static Registry::RegisterFactory<ModifyBuffferFilterConfig,
+static Registry::RegisterFactory<ModifyBufferFilterConfig,
                                  Server::Configuration::NamedHttpFilterConfigFactory>
     register_;
 

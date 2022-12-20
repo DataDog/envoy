@@ -1,3 +1,4 @@
+#include "envoy/config/core/v3/config_source.pb.h"
 #include "envoy/config/endpoint/v3/endpoint.pb.h"
 #include "envoy/config/listener/v3/listener.pb.h"
 #include "envoy/config/listener/v3/listener.pb.validate.h"
@@ -50,11 +51,12 @@ TEST(MiscFilesystemSubscriptionImplTest, BadWatch) {
   EXPECT_CALL(dispatcher, createFilesystemWatcher_()).WillOnce(Return(watcher));
   EXPECT_CALL(*watcher, addWatch(_, _, _)).WillOnce(Throw(EnvoyException("bad path")));
   NiceMock<Config::MockSubscriptionCallbacks> callbacks;
-  NiceMock<Config::MockOpaqueResourceDecoder> resource_decoder;
-  EXPECT_THROW_WITH_MESSAGE(FilesystemSubscriptionImpl(dispatcher, "##!@/dev/null", callbacks,
-                                                       resource_decoder, stats, validation_visitor,
-                                                       *api),
-                            EnvoyException, "bad path");
+  OpaqueResourceDecoderSharedPtr resource_decoder(
+      std::make_shared<NiceMock<Config::MockOpaqueResourceDecoder>>());
+  EXPECT_THROW_WITH_MESSAGE(
+      FilesystemSubscriptionImpl(dispatcher, makePathConfigSource("##!@/dev/null"), callbacks,
+                                 resource_decoder, stats, validation_visitor, *api),
+      EnvoyException, "bad path");
 }
 
 // Validate that the update_time statistic isn't changed when the configuration update gets
@@ -87,18 +89,24 @@ class FilesystemCollectionSubscriptionImplTest : public testing::Test,
                                                  Event::TestUsingSimulatedTime {
 public:
   FilesystemCollectionSubscriptionImplTest()
-      : path_(TestEnvironment::temporaryPath("lds.yaml")),
+      : path_(makePathConfigSource(TestEnvironment::temporaryPath("lds.yaml"))),
         stats_(Utility::generateStats(stats_store_)),
         api_(Api::createApiForTest(stats_store_, simTime())), dispatcher_(setupDispatcher()),
+        resource_decoder_(
+            std::make_shared<
+                TestUtility::TestOpaqueResourceDecoderImpl<envoy::config::listener::v3::Listener>>(
+                "name")),
         subscription_(*dispatcher_, path_, callbacks_, resource_decoder_, stats_,
                       ProtobufMessage::getStrictValidationVisitor(), *api_) {}
-  ~FilesystemCollectionSubscriptionImplTest() override { TestEnvironment::removePath(path_); }
+  ~FilesystemCollectionSubscriptionImplTest() override {
+    TestEnvironment::removePath(path_.path());
+  }
 
   Event::DispatcherPtr setupDispatcher() {
     auto dispatcher = std::make_unique<Event::MockDispatcher>();
     EXPECT_CALL(*dispatcher, createFilesystemWatcher_()).WillOnce(InvokeWithoutArgs([this] {
       Filesystem::MockWatcher* mock_watcher = new Filesystem::MockWatcher();
-      EXPECT_CALL(*mock_watcher, addWatch(path_, Filesystem::Watcher::Events::MovedTo, _))
+      EXPECT_CALL(*mock_watcher, addWatch(path_.path(), Filesystem::Watcher::Events::MovedTo, _))
           .WillOnce(Invoke([this](absl::string_view, uint32_t,
                                   Filesystem::Watcher::OnChangedCb cb) { on_changed_cb_ = cb; }));
       return mock_watcher;
@@ -109,7 +117,7 @@ public:
   void updateFile(const std::string& yaml) {
     // Write YAML contents to file, rename to path_ and invoke on change callback
     const std::string temp_path = TestEnvironment::writeStringToFileForTest("lds.yaml.tmp", yaml);
-    TestEnvironment::renameFile(temp_path, path_);
+    TestEnvironment::renameFile(temp_path, path_.path());
     on_changed_cb_(Filesystem::Watcher::Events::MovedTo);
   }
 
@@ -143,15 +151,14 @@ public:
     return testing::AssertionSuccess();
   }
 
-  const std::string path_;
+  const envoy::config::core::v3::PathConfigSource path_;
   Stats::IsolatedStoreImpl stats_store_;
   SubscriptionStats stats_;
   Api::ApiPtr api_;
   Event::DispatcherPtr dispatcher_;
   Filesystem::Watcher::OnChangedCb on_changed_cb_;
   NiceMock<Config::MockSubscriptionCallbacks> callbacks_;
-  TestUtility::TestOpaqueResourceDecoderImpl<envoy::config::listener::v3::Listener>
-      resource_decoder_{"name"};
+  OpaqueResourceDecoderSharedPtr resource_decoder_;
   FilesystemCollectionSubscriptionImpl subscription_;
 };
 
@@ -164,7 +171,7 @@ TEST_F(FilesystemCollectionSubscriptionImplTest, InlineEntrySuccess) {
   EXPECT_TRUE(statsAre(1, 0, 0, 0, 0, ""));
   // Initial config load.
   const auto inline_entry =
-      TestUtility::parseYaml<udpa::core::v1::CollectionEntry::InlineEntry>(R"EOF(
+      TestUtility::parseYaml<xds::core::v3::CollectionEntry::InlineEntry>(R"EOF(
 name: foo
 version: resource.1
 resource:
@@ -176,14 +183,15 @@ resource:
       address: 0.0.0.0
       port_value: 10000
   )EOF");
-  const std::string resource = fmt::format(R"EOF(
+  const std::string resource =
+      fmt::format(R"EOF(
 version: system.1
 resource:
   "@type": type.googleapis.com/envoy.config.listener.v3.ListenerCollection
   entries:
   - inline_entry: {}
   )EOF",
-                                           MessageUtil::getJsonStringFromMessage(inline_entry));
+                  MessageUtil::getJsonStringFromMessageOrDie(inline_entry));
   DecodedResourcesWrapper decoded_resources;
   decoded_resources.pushBack(std::make_unique<DecodedResourceImpl>(resource_decoder, inline_entry));
   EXPECT_CALL(callbacks_,
@@ -192,7 +200,7 @@ resource:
   EXPECT_TRUE(statsAre(2, 1, 0, 0, 1471442407191366964, "system.1"));
   // Update.
   const auto inline_entry_2 =
-      TestUtility::parseYaml<udpa::core::v1::CollectionEntry::InlineEntry>(R"EOF(
+      TestUtility::parseYaml<xds::core::v3::CollectionEntry::InlineEntry>(R"EOF(
 name: foo
 version: resource.2
 resource:
@@ -204,14 +212,15 @@ resource:
       address: 0.0.0.1
       port_value: 10001
   )EOF");
-  const std::string resource_2 = fmt::format(R"EOF(
+  const std::string resource_2 =
+      fmt::format(R"EOF(
 version: system.2
 resource:
   "@type": type.googleapis.com/envoy.config.listener.v3.ListenerCollection
   entries:
   - inline_entry: {}
   )EOF",
-                                             MessageUtil::getJsonStringFromMessage(inline_entry_2));
+                  MessageUtil::getJsonStringFromMessageOrDie(inline_entry_2));
   {
     DecodedResourcesWrapper decoded_resources_2;
     decoded_resources_2.pushBack(

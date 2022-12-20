@@ -4,13 +4,13 @@
 #include <list>
 #include <string>
 
-#include "extensions/common/redis/cluster_refresh_manager.h"
-#include "extensions/filters/network/common/redis/client.h"
-#include "extensions/filters/network/common/redis/codec_impl.h"
-#include "extensions/filters/network/common/redis/fault.h"
-#include "extensions/filters/network/redis_proxy/command_splitter.h"
-#include "extensions/filters/network/redis_proxy/conn_pool.h"
-#include "extensions/filters/network/redis_proxy/router.h"
+#include "source/extensions/common/redis/cluster_refresh_manager.h"
+#include "source/extensions/filters/network/common/redis/client.h"
+#include "source/extensions/filters/network/common/redis/codec_impl.h"
+#include "source/extensions/filters/network/common/redis/fault.h"
+#include "source/extensions/filters/network/redis_proxy/command_splitter.h"
+#include "source/extensions/filters/network/redis_proxy/conn_pool.h"
+#include "source/extensions/filters/network/redis_proxy/router.h"
 
 #include "test/test_common/printers.h"
 
@@ -81,8 +81,8 @@ public:
   ~MockInstance() override;
 
   Common::Redis::Client::PoolRequest* makeRequest(const std::string& hash_key,
-                                                  RespVariant&& request,
-                                                  PoolCallbacks& callbacks) override {
+                                                  RespVariant&& request, PoolCallbacks& callbacks,
+                                                  Common::Redis::Client::Transaction&) override {
     return makeRequest_(hash_key, request, callbacks);
   }
 
@@ -108,11 +108,16 @@ public:
   ~MockSplitCallbacks() override;
 
   void onResponse(Common::Redis::RespValuePtr&& value) override { onResponse_(value); }
+  Common::Redis::Client::Transaction& transaction() override { return transaction_; }
 
   MOCK_METHOD(bool, connectionAllowed, ());
+  MOCK_METHOD(void, onQuit, ());
   MOCK_METHOD(void, onAuth, (const std::string& password));
   MOCK_METHOD(void, onAuth, (const std::string& username, const std::string& password));
   MOCK_METHOD(void, onResponse_, (Common::Redis::RespValuePtr & value));
+
+private:
+  Common::Redis::Client::NoOpTransaction transaction_;
 };
 
 class MockInstance : public Instance {

@@ -8,6 +8,12 @@ protocol.
 
 When the files are changed on the filesystem, Envoy will automatically update its configuration.
 
+.. note::
+
+   Envoy only updates when the configuration file is replaced by a file move, and not when the file is edited in place.
+
+   It is implemented this way to ensure configuration consistency.
+
 At a minimum, you will need to start Envoy configured with the following sections:
 
 - :ref:`node <start_quick_start_dynamic_fs_node>` to uniquely identify the proxy node.
@@ -19,7 +25,7 @@ For the given example you will also need two dynamic configuration files:
 - :ref:`lds.yaml <start_quick_start_dynamic_fs_dynamic_lds>` for listeners.
 - :ref:`cds.yaml <start_quick_start_dynamic_fs_dynamic_cds>` for clusters.
 
-You can also add an :ref:`admin <start_quick_start_dynamic_fs_admin>` section if you wish to monitor Envoy or
+You can also add an :ref:`admin <start_quick_start_admin>` section if you wish to monitor Envoy or
 retrieve stats or configuration information.
 
 The following sections walk through the dynamic configuration provided in the
@@ -37,6 +43,7 @@ The :ref:`node <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.node>` should s
     :linenos:
     :lines: 1-5
     :emphasize-lines: 1-3
+    :caption: :download:`envoy-dynamic-filesystem-demo.yaml <_include/envoy-dynamic-filesystem-demo.yaml>`
 
 .. _start_quick_start_dynamic_fs_dynamic_resources:
 
@@ -54,6 +61,7 @@ In this example, the configuration is provided by the ``yaml`` files set below.
     :lines: 3-11
     :lineno-start: 3
     :emphasize-lines: 3-7
+    :caption: :download:`envoy-dynamic-filesystem-demo.yaml <_include/envoy-dynamic-filesystem-demo.yaml>`
 
 .. _start_quick_start_dynamic_fs_dynamic_lds:
 
@@ -73,7 +81,8 @@ The ``host`` headers are rewritten to ``www.envoyproxy.io``
 .. literalinclude:: _include/envoy-dynamic-lds-demo.yaml
     :language: yaml
     :linenos:
-    :emphasize-lines: 6-7, 20-21, 24, 26-27
+    :emphasize-lines: 6-7, 22-23, 26, 28-29
+    :caption: :download:`envoy-dynamic-lds-demo.yaml <_include/envoy-dynamic-lds-demo.yaml>`
 
 .. _start_quick_start_dynamic_fs_dynamic_cds:
 
@@ -89,27 +98,10 @@ proxies over ``TLS`` to https://www.envoyproxy.io.
 .. literalinclude:: _include/envoy-dynamic-cds-demo.yaml
     :language: yaml
     :linenos:
-    :emphasize-lines: 8, 14-15, 19-20
+    :emphasize-lines: 11, 17-18, 22-23
+    :caption: :download:`envoy-dynamic-cds-demo.yaml <_include/envoy-dynamic-cds-demo.yaml>`
 
-.. _start_quick_start_dynamic_fs_admin:
+.. seealso::
 
-``admin``
----------
-
-Configuring the :ref:`admin <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.admin>` section is
-the same as for :ref:`static configuration <start_quick_start_static_admin>`.
-
-Enabling the :ref:`admin <envoy_v3_api_field_config.bootstrap.v3.Bootstrap.admin>` interface with
-dynamic configuration, allows you to use the :ref:`config_dump <operations_admin_interface_config_dump>`
-endpoint to see how Envoy is currently configured.
-
-.. literalinclude:: _include/envoy-dynamic-filesystem-demo.yaml
-    :language: yaml
-    :linenos:
-    :lines: 9-16
-    :lineno-start: 9
-    :emphasize-lines: 3-8
-
-.. warning::
-
-   You may wish to restrict the network address the admin server listens to in your own deployment.
+   :ref:`atomic swaps <config_runtime_symbolic_link_swap>`
+      Details about how runtime configuration is updated.

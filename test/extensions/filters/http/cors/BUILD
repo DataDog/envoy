@@ -14,7 +14,7 @@ envoy_package()
 envoy_extension_cc_test(
     name = "cors_filter_test",
     srcs = ["cors_filter_test.cc"],
-    extension_name = "envoy.filters.http.cors",
+    extension_names = ["envoy.filters.http.cors"],
     deps = [
         "//source/common/http:header_map_lib",
         "//source/extensions/filters/http/cors:config",
@@ -29,7 +29,7 @@ envoy_extension_cc_test(
 envoy_extension_cc_test(
     name = "cors_filter_integration_test",
     srcs = ["cors_filter_integration_test.cc"],
-    extension_name = "envoy.filters.http.cors",
+    extension_names = ["envoy.filters.http.cors"],
     deps = [
         "//source/common/buffer:buffer_lib",
         "//source/common/http:header_map_lib",
@@ -37,6 +37,7 @@ envoy_extension_cc_test(
         "//test/integration:http_integration_lib",
         "//test/mocks/http:http_mocks",
         "//test/mocks/upstream:upstream_mocks",
+        "//test/test_common:test_runtime_lib",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/extensions/filters/network/http_connection_manager/v3:pkg_cc_proto",
     ],

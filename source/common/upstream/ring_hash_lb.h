@@ -7,8 +7,8 @@
 #include "envoy/stats/scope.h"
 #include "envoy/stats/stats_macros.h"
 
-#include "common/common/logger.h"
-#include "common/upstream/thread_aware_lb_impl.h"
+#include "source/common/common/logger.h"
+#include "source/common/upstream/thread_aware_lb_impl.h"
 
 namespace Envoy {
 namespace Upstream {
@@ -47,7 +47,7 @@ class RingHashLoadBalancer : public ThreadAwareLoadBalancerBase,
                              Logger::Loggable<Logger::Id::upstream> {
 public:
   RingHashLoadBalancer(
-      const PrioritySet& priority_set, ClusterStats& stats, Stats::Scope& scope,
+      const PrioritySet& priority_set, ClusterLbStats& stats, Stats::Scope& scope,
       Runtime::Loader& runtime, Random::RandomGenerator& random,
       const absl::optional<envoy::config::cluster::v3::Cluster::RingHashLbConfig>& config,
       const envoy::config::cluster::v3::Cluster::CommonLbConfig& common_config);
@@ -98,7 +98,7 @@ private:
 
   static RingHashLoadBalancerStats generateStats(Stats::Scope& scope);
 
-  Stats::ScopePtr scope_;
+  Stats::ScopeSharedPtr scope_;
   RingHashLoadBalancerStats stats_;
 
   static const uint64_t DefaultMinRingSize = 1024;

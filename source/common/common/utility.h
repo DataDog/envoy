@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <ios>
 #include <set>
 #include <sstream>
 #include <string>
@@ -10,10 +11,12 @@
 #include "envoy/common/interval_set.h"
 #include "envoy/common/time.h"
 
-#include "common/common/assert.h"
-#include "common/common/hash.h"
-#include "common/common/non_copyable.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/hash.h"
+#include "source/common/common/non_copyable.h"
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/strings/string_view.h"
 
 namespace Envoy {
@@ -55,7 +58,7 @@ private:
 
   using SpecifierOffsets = std::vector<int32_t>;
   std::string fromTimeAndPrepareSpecifierOffsets(time_t time, SpecifierOffsets& specifier_offsets,
-                                                 const std::string& seconds_str) const;
+                                                 const absl::string_view seconds_str) const;
 
   // A container to hold a specifiers (%f, %Nf, %s) found in a format string.
   struct Specifier {
@@ -111,6 +114,32 @@ public:
 };
 
 /**
+ * Class used for creating non-memory allocating std::ostream.
+ */
+class MutableMemoryStreamBuffer : public std::streambuf {
+public:
+  MutableMemoryStreamBuffer(char* base, size_t size);
+};
+
+/**
+ * std::ostream class that serializes writes into the provided buffer.
+ */
+class OutputBufferStream : private MutableMemoryStreamBuffer, public std::ostream {
+public:
+  OutputBufferStream(char* data, size_t size);
+
+  /**
+   * @return the number of bytes written prior to the "put" pointer into the buffer.
+   */
+  int bytesWritten() const;
+
+  /**
+   * @return a string view of the written bytes.
+   */
+  absl::string_view contents() const;
+};
+
+/**
  * Class used for creating non-copying std::istream's. See InputConstMemoryStream below.
  */
 class ConstMemoryStreamBuffer : public std::streambuf {
@@ -150,6 +179,30 @@ public:
    * @return uint64_t the number of milliseconds since the epoch.
    */
   static uint64_t nowToMilliseconds(TimeSource& time_source);
+
+  /**
+   * @param time_source time keeping source.
+   * @return uint64_t the number os seconds since the epoch.
+   */
+  static uint64_t nowToSeconds(TimeSource& time_source);
+};
+
+/**
+ * Utility routines for working with integers.
+ */
+class IntUtil {
+public:
+  /**
+   * Round `val` up to the next multiple. Examples:
+   *   roundUpToMultiple(3, 8) -> 8
+   *   roundUpToMultiple(9, 8) -> 16
+   *   roundUpToMultiple(8, 8) -> 8
+   */
+  static uint64_t roundUpToMultiple(uint64_t val, uint32_t multiple) {
+    ASSERT(multiple > 0);
+    ASSERT((val + multiple) >= val, "Unsigned overflow");
+    return ((val + multiple - 1) / multiple) * multiple;
+  }
 };
 
 /**
@@ -186,7 +239,7 @@ public:
   using CaseUnorderedSet =
       absl::flat_hash_set<std::string, CaseInsensitiveHash, CaseInsensitiveCompare>;
 
-  static const char WhitespaceChars[];
+  static constexpr absl::string_view WhitespaceChars = " \t\f\v\n\r";
 
   /**
    * Convert a string to an unsigned long, checking for error.
@@ -353,7 +406,17 @@ public:
    * @param source supplies the string to escape.
    * @return escaped string.
    */
-  static std::string escape(const std::string& source);
+  static std::string escape(const absl::string_view source);
+
+  /**
+   * Outputs the string to the provided ostream, while escaping \n, \r, \t, and "
+   * (double quote), ' (single quote), and \ (backslash) escaped.
+   * This may be particularly useful if you cannot allocate memory, and the
+   * ostream being written to is backed by an entity that won't allocate memory.
+   * @param os the ostream to output to.
+   * @param view a string view to output
+   */
+  static void escapeToOstream(std::ostream& os, absl::string_view view);
 
   /**
    * Provide a default value for a string if empty.
@@ -379,6 +442,21 @@ public:
    */
   static std::string removeCharacters(const absl::string_view& str,
                                       const IntervalSet<size_t>& remove_characters);
+
+  /**
+   * Check whether a string contains empty characters or space (' ', '\t', '\f', '\v', '\n', '\r').
+   * @param view string.
+   * @return true if string contains ' ', '\t', '\f', '\v', '\n', '\r'.
+   */
+  static bool hasEmptySpace(absl::string_view view);
+
+  /**
+   * Replace all empty characters or space (' ', '\t', '\f', '\v', '\n', '\r') in the string with
+   * '_'.
+   * @param view string.
+   * @return std::string the string after replaced all empty characters or space.
+   */
+  static std::string replaceAllEmptySpace(absl::string_view view);
 };
 
 /**
@@ -438,7 +516,7 @@ public:
       begin = end;
     }
 
-    NOT_REACHED_GCOVR_EXCL_LINE;
+    PANIC("unexpectedly reached");
   }
 };
 
@@ -481,6 +559,11 @@ public:
       }
     }
     intervals_.insert(Interval(left, right));
+  }
+
+  bool test(Value value) const override {
+    const auto left_pos = intervals_.lower_bound(Interval(value, value + 1));
+    return left_pos != intervals_.end() && value >= left_pos->first && value < left_pos->second;
   }
 
   std::vector<Interval> toVector() const override {
@@ -592,8 +675,8 @@ template <class Value> struct TrieLookupTable {
   }
 
   /**
-   * Finds the entry associated with the longest prefix. Complexity is O(min(longest key prefix, key
-   * length))
+   * Finds the entry associated with the longest prefix. Complexity is O(min(longest key prefix,
+   * key length)).
    * @param key the key used to find.
    * @return the value matching the longest prefix based on the key.
    */
@@ -723,6 +806,19 @@ private:
 
   uint32_t size_;
   char data_[];
+};
+
+class SetUtil {
+public:
+  // Use instead of std::set_difference for unordered absl::flat_hash_set containers.
+  template <typename T>
+  static void setDifference(const absl::flat_hash_set<T>& original_set,
+                            const absl::flat_hash_set<T>& remove_set,
+                            absl::flat_hash_set<T>& result_set) {
+    std::copy_if(original_set.begin(), original_set.end(),
+                 std::inserter(result_set, result_set.begin()),
+                 [&remove_set](const T& v) -> bool { return remove_set.count(v) == 0; });
+  }
 };
 
 } // namespace Envoy

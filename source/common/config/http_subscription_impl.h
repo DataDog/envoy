@@ -1,13 +1,12 @@
 #pragma once
 
-#include "envoy/api/v2/discovery.pb.h"
 #include "envoy/common/random_generator.h"
 #include "envoy/config/subscription.h"
 #include "envoy/event/dispatcher.h"
 #include "envoy/service/discovery/v3/discovery.pb.h"
 
-#include "common/config/api_version.h"
-#include "common/http/rest_api_fetcher.h"
+#include "source/common/config/api_version.h"
+#include "source/common/http/rest_api_fetcher.h"
 
 namespace Envoy {
 namespace Config {
@@ -28,17 +27,17 @@ public:
                        Random::RandomGenerator& random, std::chrono::milliseconds refresh_interval,
                        std::chrono::milliseconds request_timeout,
                        const Protobuf::MethodDescriptor& service_method, absl::string_view type_url,
-                       envoy::config::core::v3::ApiVersion transport_api_version,
-                       SubscriptionCallbacks& callbacks, OpaqueResourceDecoder& resource_decoder,
-                       SubscriptionStats stats, std::chrono::milliseconds init_fetch_timeout,
+                       SubscriptionCallbacks& callbacks,
+                       OpaqueResourceDecoderSharedPtr resource_decoder, SubscriptionStats stats,
+                       std::chrono::milliseconds init_fetch_timeout,
                        ProtobufMessage::ValidationVisitor& validation_visitor);
 
   // Config::Subscription
-  void start(const std::set<std::string>& resource_names,
-             const bool use_namespace_matching = false) override;
-  void updateResourceInterest(const std::set<std::string>& update_to_these_names) override;
-  void requestOnDemandUpdate(const std::set<std::string>&) override {
-    NOT_IMPLEMENTED_GCOVR_EXCL_LINE;
+  void start(const absl::flat_hash_set<std::string>& resource_names) override;
+  void
+  updateResourceInterest(const absl::flat_hash_set<std::string>& update_to_these_names) override;
+  void requestOnDemandUpdate(const absl::flat_hash_set<std::string>&) override {
+    ENVOY_BUG(false, "unexpected request for on demand update");
   }
 
   // Http::RestApiFetcher
@@ -55,13 +54,12 @@ private:
   Protobuf::RepeatedPtrField<std::string> resources_;
   envoy::service::discovery::v3::DiscoveryRequest request_;
   Config::SubscriptionCallbacks& callbacks_;
-  Config::OpaqueResourceDecoder& resource_decoder_;
+  Config::OpaqueResourceDecoderSharedPtr resource_decoder_;
   SubscriptionStats stats_;
   Event::Dispatcher& dispatcher_;
   std::chrono::milliseconds init_fetch_timeout_;
   Event::TimerPtr init_fetch_timeout_timer_;
   ProtobufMessage::ValidationVisitor& validation_visitor_;
-  const envoy::config::core::v3::ApiVersion transport_api_version_;
 };
 
 } // namespace Config

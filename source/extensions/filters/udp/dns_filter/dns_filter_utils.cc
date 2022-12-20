@@ -1,12 +1,12 @@
-#include "extensions/filters/udp/dns_filter/dns_filter_utils.h"
+#include "source/extensions/filters/udp/dns_filter/dns_filter_utils.h"
 
 #include <algorithm>
 
 #include "envoy/common/platform.h"
 
-#include "common/common/empty_string.h"
-#include "common/common/logger.h"
-#include "common/network/address_impl.h"
+#include "source/common/common/empty_string.h"
+#include "source/common/common/logger.h"
+#include "source/common/network/address_impl.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -46,19 +46,6 @@ absl::string_view getServiceFromName(const absl::string_view name) {
   return EMPTY_STRING;
 }
 
-absl::string_view getProtoFromName(const absl::string_view name) {
-  size_t start = name.find_first_of('.');
-  if (start != std::string::npos && ++start < name.size() - 1) {
-    if (name[start] == '_') {
-      const size_t offset = name.find_first_of('.', ++start);
-      if (start != std::string::npos && offset < name.size()) {
-        return name.substr(start, offset - start);
-      }
-    }
-  }
-  return EMPTY_STRING;
-}
-
 std::string buildServiceName(const std::string& name, const std::string& proto,
                              const std::string& domain) {
   std::string result{};
@@ -84,6 +71,24 @@ getAddressRecordType(const Network::Address::InstanceConstSharedPtr& ipaddr) {
   }
   return absl::nullopt;
 }
+
+absl::string_view getDomainSuffix(const absl::string_view name) {
+  size_t pos, offset = std::string::npos, iterations = MAX_SUFFIX_LABEL_COUNT;
+
+  // Start from the end of a name and attempt to determine the last
+  // two labels. This should return the domain name and the top level
+  // domain
+  while (iterations--) {
+    pos = name.find_last_of('.', offset);
+    if (pos == std::string::npos) {
+      return name;
+    }
+    offset = pos - 1;
+  }
+
+  return name.substr(pos + 1);
+}
+
 } // namespace Utils
 } // namespace DnsFilter
 } // namespace UdpFilters

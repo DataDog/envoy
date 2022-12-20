@@ -1,4 +1,3 @@
-load("@rules_cc//cc:defs.bzl", "cc_test")
 load("@com_envoyproxy_protoc_gen_validate//bazel:pgv_proto_library.bzl", "pgv_cc_proto_library")
 load("@com_github_grpc_grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load("@com_google_protobuf//:protobuf.bzl", _py_proto_library = "py_proto_library")
@@ -11,6 +10,8 @@ load(
     "EXTERNAL_PROTO_GO_BAZEL_DEP_MAP",
     "EXTERNAL_PROTO_PY_BAZEL_DEP_MAP",
 )
+
+EnvoyProtoDepsInfo = provider(fields = ["deps"])
 
 _PY_PROTO_SUFFIX = "_py_proto"
 _CC_PROTO_SUFFIX = "_cc_proto"
@@ -143,7 +144,7 @@ def api_cc_py_proto_library(
         _api_cc_grpc_library(name = cc_grpc_name, proto = relative_name, deps = cc_proto_deps)
 
 def api_cc_test(name, **kwargs):
-    cc_test(
+    native.cc_test(
         name = name,
         **kwargs
     )
@@ -178,22 +179,26 @@ def api_proto_package(
 
     # Because RBAC proro depends on googleapis syntax.proto and checked.proto,
     # which share the same go proto library, it causes duplicative dependencies.
-    # Thus, we use depset().to_list() to remove duplicated depenencies.
+    # Thus, we use a dictionary below to simulate a set and remove duplicated dependencies.
+    deps = (
+        [_go_proto_mapping(dep) for dep in deps] +
+        [
+            "@com_envoyproxy_protoc_gen_validate//validate:go_default_library",
+            "@com_github_golang_protobuf//ptypes:go_default_library_gen",
+            "@go_googleapis//google/api:annotations_go_proto",
+            "@go_googleapis//google/rpc:status_go_proto",
+            "@io_bazel_rules_go//proto/wkt:any_go_proto",
+            "@io_bazel_rules_go//proto/wkt:duration_go_proto",
+            "@io_bazel_rules_go//proto/wkt:struct_go_proto",
+            "@io_bazel_rules_go//proto/wkt:timestamp_go_proto",
+            "@io_bazel_rules_go//proto/wkt:wrappers_go_proto",
+        ]
+    )
     go_proto_library(
         name = name + _GO_PROTO_SUFFIX,
         compilers = compilers,
         importpath = _GO_IMPORTPATH_PREFIX + native.package_name(),
         proto = name,
         visibility = ["//visibility:public"],
-        deps = depset([_go_proto_mapping(dep) for dep in deps] + [
-            "@com_github_golang_protobuf//ptypes:go_default_library",
-            "@com_github_golang_protobuf//ptypes/any:go_default_library",
-            "@com_github_golang_protobuf//ptypes/duration:go_default_library",
-            "@com_github_golang_protobuf//ptypes/struct:go_default_library",
-            "@com_github_golang_protobuf//ptypes/timestamp:go_default_library",
-            "@com_github_golang_protobuf//ptypes/wrappers:go_default_library",
-            "@com_envoyproxy_protoc_gen_validate//validate:go_default_library",
-            "@com_google_googleapis//google/api:annotations_go_proto",
-            "@com_google_googleapis//google/rpc:status_go_proto",
-        ]).to_list(),
+        deps = {dep: True for dep in deps}.keys(),
     )

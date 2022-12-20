@@ -1,13 +1,14 @@
-#include "extensions/filters/http/cache/cache_filter.h"
+#include "source/extensions/filters/http/cache/cache_filter.h"
 
 #include "envoy/http/header_map.h"
 
-#include "common/common/enum_to_int.h"
-#include "common/http/headers.h"
-#include "common/http/utility.h"
-
-#include "extensions/filters/http/cache/cacheability_utils.h"
-#include "extensions/filters/http/cache/inline_headers_handles.h"
+#include "source/common/common/enum_to_int.h"
+#include "source/common/http/headers.h"
+#include "source/common/http/utility.h"
+#include "source/extensions/filters/http/cache/cache_custom_headers.h"
+#include "source/extensions/filters/http/cache/cache_entry_utils.h"
+#include "source/extensions/filters/http/cache/cache_filter_logging_info.h"
+#include "source/extensions/filters/http/cache/cacheability_utils.h"
 
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
@@ -30,9 +31,9 @@ struct CacheResponseCodeDetailValues {
 
 using CacheResponseCodeDetails = ConstSingleton<CacheResponseCodeDetailValues>;
 
-CacheFilter::CacheFilter(
-    const envoy::extensions::filters::http::cache::v3alpha::CacheConfig& config, const std::string&,
-    Stats::Scope&, TimeSource& time_source, HttpCache& http_cache)
+CacheFilter::CacheFilter(const envoy::extensions::filters::http::cache::v3::CacheConfig& config,
+                         const std::string&, Stats::Scope&, TimeSource& time_source,
+                         HttpCache& http_cache)
     : time_source_(time_source), cache_(http_cache),
       vary_allow_list_(config.allowed_vary_headers()) {}
 
@@ -46,6 +47,15 @@ void CacheFilter::onDestroy() {
   }
 }
 
+void CacheFilter::onStreamComplete() {
+  LookupStatus lookup_status = lookupStatus();
+  InsertStatus insert_status = insertStatus();
+  decoder_callbacks_->streamInfo().filterState()->setData(
+      CacheFilterLoggingInfo::FilterStateKey,
+      std::make_shared<CacheFilterLoggingInfo>(lookup_status, insert_status),
+      StreamInfo::FilterState::StateType::ReadOnly);
+}
+
 Http::FilterHeadersStatus CacheFilter::decodeHeaders(Http::RequestHeaderMap& headers,
                                                      bool end_stream) {
   ENVOY_STREAM_LOG(debug, "CacheFilter::decodeHeaders: {}", *decoder_callbacks_, headers);
@@ -54,18 +64,22 @@ Http::FilterHeadersStatus CacheFilter::decodeHeaders(Http::RequestHeaderMap& hea
         debug,
         "CacheFilter::decodeHeaders ignoring request because it has body and/or trailers: {}",
         *decoder_callbacks_, headers);
+    filter_state_ = FilterState::NotServingFromCache;
     return Http::FilterHeadersStatus::Continue;
   }
-  if (!CacheabilityUtils::isCacheableRequest(headers)) {
+  if (!CacheabilityUtils::canServeRequestFromCache(headers)) {
     ENVOY_STREAM_LOG(debug, "CacheFilter::decodeHeaders ignoring uncacheable request: {}",
                      *decoder_callbacks_, headers);
+    filter_state_ = FilterState::NotServingFromCache;
+    insert_status_ = InsertStatus::NoInsertRequestNotCacheable;
     return Http::FilterHeadersStatus::Continue;
   }
   ASSERT(decoder_callbacks_);
 
   LookupRequest lookup_request(headers, time_source_.systemTime(), vary_allow_list_);
   request_allows_inserts_ = !lookup_request.requestCacheControl().no_store_;
-  lookup_ = cache_.makeLookupContext(std::move(lookup_request));
+  is_head_request_ = headers.getMethodValue() == Http::Headers::get().MethodValues.Head;
+  lookup_ = cache_.makeLookupContext(std::move(lookup_request), *decoder_callbacks_);
 
   ASSERT(lookup_);
   getHeaders(headers);
@@ -88,22 +102,52 @@ Http::FilterHeadersStatus CacheFilter::encodeHeaders(Http::ResponseHeaderMap& he
     return Http::FilterHeadersStatus::Continue;
   }
 
+  if (lookup_result_ == nullptr) {
+    // Filter chain iteration is paused while a lookup is outstanding, but the filter chain manager
+    // can still generate a local reply. One case where this can happen is when a downstream idle
+    // timeout fires, which may mean that the HttpCache isn't correctly setting deadlines on its
+    // asynchronous operations or is otherwise getting stuck.
+    ENVOY_BUG(Http::Utility::getResponseStatus(headers) !=
+                  Envoy::enumToInt(Http::Code::RequestTimeout),
+              "Request timed out while cache lookup was outstanding.");
+    filter_state_ = FilterState::NotServingFromCache;
+    return Http::FilterHeadersStatus::Continue;
+  }
+
   if (filter_state_ == FilterState::ValidatingCachedResponse && isResponseNotModified(headers)) {
     processSuccessfulValidation(headers);
     // Stop the encoding stream until the cached response is fetched & added to the encoding stream.
-    return Http::FilterHeadersStatus::StopIteration;
+    if (is_head_request_) {
+      // Return since HEAD requests are not cached
+      return Http::FilterHeadersStatus::Continue;
+    } else {
+      return Http::FilterHeadersStatus::StopIteration;
+    }
   }
 
   // Either a cache miss or a cache entry that is no longer valid.
   // Check if the new response can be cached.
-  if (request_allows_inserts_ &&
+  if (request_allows_inserts_ && !is_head_request_ &&
       CacheabilityUtils::isCacheableResponse(headers, vary_allow_list_)) {
     ENVOY_STREAM_LOG(debug, "CacheFilter::encodeHeaders inserting headers", *encoder_callbacks_);
-    insert_ = cache_.makeInsertContext(std::move(lookup_));
+    insert_ = cache_.makeInsertContext(std::move(lookup_), *encoder_callbacks_);
     // Add metadata associated with the cached response. Right now this is only response_time;
     const ResponseMetadata metadata = {time_source_.systemTime()};
-    insert_->insertHeaders(headers, metadata, end_stream);
+    // TODO(capoferro): Note that there is currently no way to communicate back to the CacheFilter
+    // that an insert has failed. If an insert fails partway, it's better not to send additional
+    // chunks to the cache if we're already in a failure state and should abort, but we can only do
+    // that if we can communicate failures back to the filter, so we should fix this.
+    insert_->insertHeaders(
+        headers, metadata, [](bool) {}, end_stream);
+    if (end_stream) {
+      insert_status_ = InsertStatus::InsertSucceeded;
+    }
+    // insert_status_ remains absl::nullopt if end_stream == false, as we have not completed the
+    // insertion yet.
+  } else {
+    insert_status_ = InsertStatus::NoInsertResponseNotCacheable;
   }
+  filter_state_ = FilterState::NotServingFromCache;
   return Http::FilterHeadersStatus::Continue;
 }
 
@@ -122,8 +166,106 @@ Http::FilterDataStatus CacheFilter::encodeData(Buffer::Instance& data, bool end_
     // TODO(toddmgreer): Wait for the cache if necessary.
     insert_->insertBody(
         data, [](bool) {}, end_stream);
+    if (end_stream) {
+      insert_status_ = InsertStatus::InsertSucceeded;
+    }
+    // insert_status_ remains absl::nullopt if end_stream == false, as we have not completed the
+    // insertion yet.
   }
   return Http::FilterDataStatus::Continue;
+}
+
+Http::FilterTrailersStatus CacheFilter::encodeTrailers(Http::ResponseTrailerMap& trailers) {
+  if (filter_state_ == FilterState::DecodeServingFromCache) {
+    // This call was invoked during decoding by decoder_callbacks_->encodeTrailers because a fresh
+    // cached response was found and is being added to the encoding stream -- ignore it.
+    return Http::FilterTrailersStatus::Continue;
+  }
+  if (filter_state_ == FilterState::EncodeServingFromCache) {
+    // Stop the encoding stream until the cached response is fetched & added to the encoding stream.
+    return Http::FilterTrailersStatus::StopIteration;
+  }
+  response_has_trailers_ = !trailers.empty();
+  if (insert_) {
+    ENVOY_STREAM_LOG(debug, "CacheFilter::encodeTrailers inserting trailers", *encoder_callbacks_);
+    insert_->insertTrailers(trailers, [](bool) {});
+  }
+  insert_status_ = InsertStatus::InsertSucceeded;
+
+  return Http::FilterTrailersStatus::Continue;
+}
+
+/*static*/ LookupStatus
+CacheFilter::resolveLookupStatus(absl::optional<CacheEntryStatus> cache_entry_status,
+                                 FilterState filter_state) {
+  if (cache_entry_status.has_value()) {
+    switch (cache_entry_status.value()) {
+    case CacheEntryStatus::Ok:
+      return LookupStatus::CacheHit;
+    case CacheEntryStatus::Unusable:
+      return LookupStatus::CacheMiss;
+    case CacheEntryStatus::RequiresValidation: {
+      // The CacheFilter sent the response upstream for validation; check the
+      // filter state to see whether and how the upstream responded. The
+      // filter currently won't send the stale entry if it can't reach the
+      // upstream or if the upstream responds with a 5xx, so don't include
+      // special handling for those cases.
+      switch (filter_state) {
+      case FilterState::ValidatingCachedResponse:
+        return LookupStatus::RequestIncomplete;
+      case FilterState::EncodeServingFromCache:
+        ABSL_FALLTHROUGH_INTENDED;
+      case FilterState::ResponseServedFromCache:
+        // Functionally a cache hit, this is differentiated for metrics reporting.
+        return LookupStatus::StaleHitWithSuccessfulValidation;
+      case FilterState::NotServingFromCache:
+        return LookupStatus::StaleHitWithFailedValidation;
+      case FilterState::Initial:
+        ABSL_FALLTHROUGH_INTENDED;
+      case FilterState::DecodeServingFromCache:
+        ABSL_FALLTHROUGH_INTENDED;
+      case FilterState::Destroyed:
+        IS_ENVOY_BUG(absl::StrCat("Unexpected filter state in requestCacheStatus: cache lookup "
+                                  "response required validation, but filter state is ",
+                                  filter_state));
+      }
+      return LookupStatus::Unknown;
+    }
+    case CacheEntryStatus::FoundNotModified:
+      // TODO(capoferro): Report this as a FoundNotModified when we handle
+      // those.
+      return LookupStatus::CacheHit;
+    case CacheEntryStatus::LookupError:
+      return LookupStatus::LookupError;
+    }
+    IS_ENVOY_BUG(absl::StrCat(
+        "Unhandled CacheEntryStatus encountered when retrieving request cache status: " +
+        std::to_string(static_cast<int>(filter_state))));
+    return LookupStatus::Unknown;
+  }
+  // Either decodeHeaders decided not to do a cache lookup (because the
+  // request isn't cacheable), or decodeHeaders hasn't been called yet.
+  switch (filter_state) {
+  case FilterState::Initial:
+    return LookupStatus::RequestIncomplete;
+  case FilterState::NotServingFromCache:
+    return LookupStatus::RequestNotCacheable;
+  // Ignore the following lines. This code should not be executed.
+  // GCOV_EXCL_START
+  case FilterState::ValidatingCachedResponse:
+    ABSL_FALLTHROUGH_INTENDED;
+  case FilterState::DecodeServingFromCache:
+    ABSL_FALLTHROUGH_INTENDED;
+  case FilterState::EncodeServingFromCache:
+    ABSL_FALLTHROUGH_INTENDED;
+  case FilterState::ResponseServedFromCache:
+    ABSL_FALLTHROUGH_INTENDED;
+  case FilterState::Destroyed:
+    ENVOY_LOG(error, absl::StrCat("Unexpected filter state in requestCacheStatus: "
+                                  "lookup_result_ is empty but filter state is ",
+                                  filter_state));
+  }
+  return LookupStatus::Unknown;
 }
 
 void CacheFilter::getHeaders(Http::RequestHeaderMap& request_headers) {
@@ -151,14 +293,14 @@ void CacheFilter::getHeaders(Http::RequestHeaderMap& request_headers) {
     // unique_ptr when the result is re-instantiated.
     dispatcher.post([self, &request_headers, status = result.cache_entry_status_,
                      headers_raw_ptr = result.headers_.release(),
-                     response_ranges = std::move(result.response_ranges_),
+                     range_details = std::move(result.range_details_),
                      content_length = result.content_length_,
                      has_trailers = result.has_trailers_]() mutable {
       // Wrap the raw pointer in a unique_ptr before checking to avoid memory leaks.
       Http::ResponseHeaderMapPtr headers = absl::WrapUnique(headers_raw_ptr);
       if (CacheFilterSharedPtr cache_filter = self.lock()) {
         cache_filter->onHeaders(
-            LookupResult{status, std::move(headers), content_length, response_ranges, has_trailers},
+            LookupResult{status, std::move(headers), content_length, range_details, has_trailers},
             request_headers);
       }
     });
@@ -229,63 +371,43 @@ void CacheFilter::onHeaders(LookupResult&& result, Http::RequestHeaderMap& reque
     // The filter is being destroyed, any callbacks should be ignored.
     return;
   }
-  // TODO(yosrym93): Handle request only-if-cached directive
-  switch (result.cache_entry_status_) {
-  case CacheEntryStatus::FoundNotModified:
-    NOT_IMPLEMENTED_GCOVR_EXCL_LINE; // We don't yet return or support these codes.
-  case CacheEntryStatus::RequiresValidation:
-    // If a cache entry requires validation, inject validation headers in the request and let it
-    // pass through as if no cache entry was found.
-    // If the cache entry was valid, the response status should be 304 (unmodified) and the cache
-    // entry will be injected in the response body.
-    lookup_result_ = std::make_unique<LookupResult>(std::move(result));
-    filter_state_ = FilterState::ValidatingCachedResponse;
-    injectValidationHeaders(request_headers);
-    break;
-  case CacheEntryStatus::Unusable:
-    break;
-  case CacheEntryStatus::NotSatisfiableRange:
-    lookup_result_ = std::make_unique<LookupResult>(std::move(result));
-    filter_state_ = FilterState::DecodeServingFromCache;
-    lookup_result_->headers_->setStatus(static_cast<uint64_t>(Http::Code::RangeNotSatisfiable));
-    lookup_result_->headers_->addCopy(Http::Headers::get().ContentRange,
-                                      absl::StrCat("bytes */", lookup_result_->content_length_));
-    // We shouldn't serve any of the body, so the response content length is 0.
-    lookup_result_->setContentLength(0);
-    encodeCachedResponse();
-    break;
-  case CacheEntryStatus::SatisfiableRange:
-    if (result.response_ranges_.size() == 1) {
-      lookup_result_ = std::make_unique<LookupResult>(std::move(result));
-      filter_state_ = FilterState::DecodeServingFromCache;
-      lookup_result_->headers_->setStatus(static_cast<uint64_t>(Http::Code::PartialContent));
-      lookup_result_->headers_->addCopy(
-          Http::Headers::get().ContentRange,
-          absl::StrCat("bytes ", lookup_result_->response_ranges_[0].begin(), "-",
-                       lookup_result_->response_ranges_[0].end() - 1, "/",
-                       lookup_result_->content_length_));
-      // We serve only the desired range, so adjust the length accordingly.
-      lookup_result_->setContentLength(lookup_result_->response_ranges_[0].length());
-      remaining_ranges_ = std::move(lookup_result_->response_ranges_);
-      encodeCachedResponse();
-      break;
-    }
-    // Multi-part responses are not supported, and they will be treated as a usual 200 response on
-    // ::Ok case below. A possible way to achieve that would be to move all ranges to
-    // remaining_ranges_, and add logic inside '::onBody' to interleave the body bytes with
-    // sub-headers and separator string for each part. Would need to keep track if the current range
-    // is over or not to know when to insert the separator, and calculate the length based on length
-    // of ranges + extra headers and separators.
-    ABSL_FALLTHROUGH_INTENDED;
-  case CacheEntryStatus::Ok:
-    lookup_result_ = std::make_unique<LookupResult>(std::move(result));
-    filter_state_ = FilterState::DecodeServingFromCache;
-    encodeCachedResponse();
-    // Return here so that continueDecoding is not called.
-    // No need to continue the decoding stream as a cached response is already being served.
+  if (filter_state_ == FilterState::NotServingFromCache) {
+    // A response was injected into the filter chain before the cache lookup finished, e.g. because
+    // the request stream timed out.
     return;
   }
-  // decodeHeaders returned StopIteration waiting for this callback -- continue decoding
+
+  // TODO(yosrym93): Handle request only-if-cached directive
+  lookup_result_ = std::make_unique<LookupResult>(std::move(result));
+  switch (lookup_result_->cache_entry_status_) {
+  case CacheEntryStatus::FoundNotModified:
+    PANIC("unsupported code");
+  case CacheEntryStatus::RequiresValidation:
+    // If a cache entry requires validation, inject validation headers in the
+    // request and let it pass through as if no cache entry was found. If the
+    // cache entry was valid, the response status should be 304 (unmodified)
+    // and the cache entry will be injected in the response body.
+    handleCacheHitWithValidation(request_headers);
+    return;
+  case CacheEntryStatus::Ok:
+    if (lookup_result_->range_details_.has_value()) {
+      handleCacheHitWithRangeRequest();
+      return;
+    }
+    handleCacheHit();
+    return;
+  case CacheEntryStatus::Unusable:
+    decoder_callbacks_->continueDecoding();
+    return;
+  case CacheEntryStatus::LookupError:
+    filter_state_ = FilterState::NotServingFromCache;
+    insert_status_ = InsertStatus::NoInsertLookupError;
+    decoder_callbacks_->continueDecoding();
+    return;
+  }
+  ENVOY_LOG(error, "Unhandled CacheEntryStatus in CacheFilter::onHeaders: {}",
+            cacheEntryStatusString(lookup_result_->cache_entry_status_));
+  // Treat unhandled status as a cache miss.
   decoder_callbacks_->continueDecoding();
 }
 
@@ -318,7 +440,7 @@ void CacheFilter::onBody(Buffer::InstancePtr&& body) {
 
   filter_state_ == FilterState::DecodeServingFromCache
       ? decoder_callbacks_->encodeData(*body, end_stream)
-      : encoder_callbacks_->addEncodedData(*body, true);
+      : encoder_callbacks_->addEncodedData(*body, !response_has_trailers_);
 
   if (!remaining_ranges_.empty()) {
     getBody();
@@ -345,6 +467,68 @@ void CacheFilter::onTrailers(Http::ResponseTrailerMapPtr&& trailers) {
   finalizeEncodingCachedResponse();
 }
 
+void CacheFilter::handleCacheHit() {
+  filter_state_ = FilterState::DecodeServingFromCache;
+  insert_status_ = InsertStatus::NoInsertCacheHit;
+  encodeCachedResponse();
+}
+
+void CacheFilter::handleCacheHitWithRangeRequest() {
+  if (!lookup_result_->range_details_.has_value()) {
+    ENVOY_LOG(error, "handleCacheHitWithRangeRequest() should not be called without "
+                     "range_details being populated in lookup_result_");
+    return;
+  }
+  if (!lookup_result_->range_details_->satisfiable_) {
+    filter_state_ = FilterState::DecodeServingFromCache;
+    insert_status_ = InsertStatus::NoInsertCacheHit;
+    lookup_result_->headers_->setStatus(
+        static_cast<uint64_t>(Envoy::Http::Code::RangeNotSatisfiable));
+    lookup_result_->headers_->addCopy(Envoy::Http::Headers::get().ContentRange,
+                                      absl::StrCat("bytes */", lookup_result_->content_length_));
+    // We shouldn't serve any of the body, so the response content length
+    // is 0.
+    lookup_result_->setContentLength(0);
+    encodeCachedResponse();
+    decoder_callbacks_->continueDecoding();
+    return;
+  }
+
+  std::vector<AdjustedByteRange> ranges = lookup_result_->range_details_->ranges_;
+  if (ranges.size() != 1) {
+    // Multi-part responses are not supported, and they will be treated as
+    // a usual 200 response. A possible way to achieve that would be to move
+    // all ranges to remaining_ranges_, and add logic inside '::onBody' to
+    // interleave the body bytes with sub-headers and separator string for
+    // each part. Would need to keep track if the current range is over or
+    // not to know when to insert the separator, and calculate the length
+    // based on length of ranges + extra headers and separators.
+    handleCacheHit();
+    return;
+  }
+
+  filter_state_ = FilterState::DecodeServingFromCache;
+  insert_status_ = InsertStatus::NoInsertCacheHit;
+
+  lookup_result_->headers_->setStatus(static_cast<uint64_t>(Envoy::Http::Code::PartialContent));
+  lookup_result_->headers_->addCopy(Envoy::Http::Headers::get().ContentRange,
+                                    absl::StrCat("bytes ", ranges[0].begin(), "-",
+                                                 ranges[0].end() - 1, "/",
+                                                 lookup_result_->content_length_));
+  // We serve only the desired range, so adjust the length
+  // accordingly.
+  lookup_result_->setContentLength(ranges[0].length());
+  remaining_ranges_ = std::move(ranges);
+  encodeCachedResponse();
+  decoder_callbacks_->continueDecoding();
+}
+
+void CacheFilter::handleCacheHitWithValidation(Envoy::Http::RequestHeaderMap& request_headers) {
+  filter_state_ = FilterState::ValidatingCachedResponse;
+  injectValidationHeaders(request_headers);
+  decoder_callbacks_->continueDecoding();
+}
+
 void CacheFilter::processSuccessfulValidation(Http::ResponseHeaderMap& response_headers) {
   ASSERT(lookup_result_, "CacheFilter trying to validate a non-existent lookup result");
   ASSERT(
@@ -366,7 +550,7 @@ void CacheFilter::processSuccessfulValidation(Http::ResponseHeaderMap& response_
   // freshly served response from the origin, unless the 304 response has an Age header, which
   // means it was served by an upstream cache.
   // Remove any existing Age header in the cached response.
-  lookup_result_->headers_->removeInline(age_handle.handle());
+  lookup_result_->headers_->removeInline(CacheCustomHeaders::age());
 
   // Add any missing headers from the cached response to the 304 response.
   lookup_result_->headers_->iterate([&response_headers](const Http::HeaderEntry& cached_header) {
@@ -383,7 +567,9 @@ void CacheFilter::processSuccessfulValidation(Http::ResponseHeaderMap& response_
     // TODO(yosrym93): else the cached entry should be deleted.
     // Update metadata associated with the cached response. Right now this is only response_time;
     const ResponseMetadata metadata = {time_source_.systemTime()};
-    cache_.updateHeaders(*lookup_, response_headers, metadata);
+    cache_.updateHeaders(*lookup_, response_headers, metadata,
+                         [](bool updated ABSL_ATTRIBUTE_UNUSED) {});
+    insert_status_ = InsertStatus::HeaderUpdate;
   }
 
   // A cache entry was successfully validated -> encode cached body and trailers.
@@ -404,8 +590,9 @@ bool CacheFilter::shouldUpdateCachedEntry(const Http::ResponseHeaderMap& respons
   // and assuming a single cached response per key:
   // If the 304 response contains a strong validator (etag) that does not match the cached response,
   // the cached response should not be updated.
-  const Http::HeaderEntry* response_etag = response_headers.getInline(etag_handle.handle());
-  const Http::HeaderEntry* cached_etag = lookup_result_->headers_->getInline(etag_handle.handle());
+  const Http::HeaderEntry* response_etag = response_headers.getInline(CacheCustomHeaders::etag());
+  const Http::HeaderEntry* cached_etag =
+      lookup_result_->headers_->getInline(CacheCustomHeaders::etag());
   return !response_etag || (cached_etag && cached_etag->value().getStringView() ==
                                                response_etag->value().getStringView());
 }
@@ -417,24 +604,25 @@ void CacheFilter::injectValidationHeaders(Http::RequestHeaderMap& request_header
          "injectValidationHeaders precondition unsatisfied: the "
          "CacheFilter is not validating a cache lookup result");
 
-  const Http::HeaderEntry* etag_header = lookup_result_->headers_->getInline(etag_handle.handle());
+  const Http::HeaderEntry* etag_header =
+      lookup_result_->headers_->getInline(CacheCustomHeaders::etag());
   const Http::HeaderEntry* last_modified_header =
-      lookup_result_->headers_->getInline(last_modified_handle.handle());
+      lookup_result_->headers_->getInline(CacheCustomHeaders::lastModified());
 
   if (etag_header) {
     absl::string_view etag = etag_header->value().getStringView();
-    request_headers.setInline(if_none_match_handle.handle(), etag);
+    request_headers.setInline(CacheCustomHeaders::ifNoneMatch(), etag);
   }
   if (DateUtil::timePointValid(CacheHeadersUtils::httpTime(last_modified_header))) {
     // Valid Last-Modified header exists.
     absl::string_view last_modified = last_modified_header->value().getStringView();
-    request_headers.setInline(if_modified_since_handle.handle(), last_modified);
+    request_headers.setInline(CacheCustomHeaders::ifModifiedSince(), last_modified);
   } else {
     // Either Last-Modified is missing or invalid, fallback to Date.
     // A correct behaviour according to:
     // https://httpwg.org/specs/rfc7232.html#header.if-modified-since
     absl::string_view date = lookup_result_->headers_->getDateValue();
-    request_headers.setInline(if_modified_since_handle.handle(), date);
+    request_headers.setInline(CacheCustomHeaders::ifModifiedSince(), date);
   }
 }
 
@@ -443,7 +631,8 @@ void CacheFilter::encodeCachedResponse() {
                          "does not point to a cache lookup result");
 
   response_has_trailers_ = lookup_result_->has_trailers_;
-  const bool end_stream = (lookup_result_->content_length_ == 0 && !response_has_trailers_);
+  const bool end_stream =
+      (lookup_result_->content_length_ == 0 && !response_has_trailers_) || is_head_request_;
 
   // Set appropriate response flags and codes.
   Http::StreamFilterCallbacks* callbacks =
@@ -461,8 +650,11 @@ void CacheFilter::encodeCachedResponse() {
     decoder_callbacks_->encodeHeaders(std::move(lookup_result_->headers_), end_stream,
                                       CacheResponseCodeDetails::get().ResponseFromCacheFilter);
   }
-
-  if (lookup_result_->content_length_ > 0) {
+  if (filter_state_ == FilterState::EncodeServingFromCache && is_head_request_) {
+    filter_state_ = FilterState::ResponseServedFromCache;
+    return;
+  }
+  if (lookup_result_->content_length_ > 0 && !is_head_request_) {
     // No range has been added, so we add entire body to the response.
     if (remaining_ranges_.empty()) {
       remaining_ranges_.emplace_back(0, lookup_result_->content_length_);
@@ -480,6 +672,24 @@ void CacheFilter::finalizeEncodingCachedResponse() {
     encoder_callbacks_->continueEncoding();
   }
   filter_state_ = FilterState::ResponseServedFromCache;
+}
+
+LookupStatus CacheFilter::lookupStatus() const {
+  if (lookup_result_ == nullptr && lookup_ != nullptr) {
+    return LookupStatus::RequestIncomplete;
+  }
+
+  if (lookup_result_ != nullptr) {
+    return resolveLookupStatus(lookup_result_->cache_entry_status_, filter_state_);
+  } else {
+    return resolveLookupStatus(absl::nullopt, filter_state_);
+  }
+}
+
+InsertStatus CacheFilter::insertStatus() const {
+  return insert_status_.value_or((insert_ == nullptr)
+                                     ? InsertStatus::NoInsertRequestIncomplete
+                                     : InsertStatus::InsertAbortedResponseIncomplete);
 }
 
 } // namespace Cache

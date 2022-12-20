@@ -19,12 +19,23 @@ namespace Event {
 MockDispatcher::MockDispatcher() : MockDispatcher("test_thread") {}
 
 MockDispatcher::MockDispatcher(const std::string& name) : name_(name) {
+  time_system_ = std::make_unique<GlobalTimeSystem>();
   ON_CALL(*this, initializeStats(_, _)).WillByDefault(Return());
   ON_CALL(*this, clearDeferredDeleteList()).WillByDefault(Invoke([this]() -> void {
     to_delete_.clear();
   }));
   ON_CALL(*this, createTimer_(_)).WillByDefault(ReturnNew<NiceMock<Event::MockTimer>>());
+  ON_CALL(*this, createScaledTimer_(_, _)).WillByDefault(ReturnNew<NiceMock<Event::MockTimer>>());
+  ON_CALL(*this, createScaledTypedTimer_(_, _))
+      .WillByDefault(ReturnNew<NiceMock<Event::MockTimer>>());
   ON_CALL(*this, post(_)).WillByDefault(Invoke([](PostCb cb) -> void { cb(); }));
+
+  ON_CALL(buffer_factory_, createBuffer_(_, _, _))
+      .WillByDefault(Invoke([](std::function<void()> below_low, std::function<void()> above_high,
+                               std::function<void()> above_overflow) -> Buffer::Instance* {
+        return new Buffer::WatermarkBuffer(below_low, above_high, above_overflow);
+      }));
+  ON_CALL(*this, isThreadSafe()).WillByDefault(Return(true));
 }
 
 MockDispatcher::~MockDispatcher() = default;
@@ -39,14 +50,18 @@ MockTimer::MockTimer() {
   ON_CALL(*this, enabled()).WillByDefault(ReturnPointee(&enabled_));
 }
 
-// Ownership of each MockTimer instance is transferred to the (caller of) dispatcher's
-// createTimer_(), so to avoid destructing it twice, the MockTimer must have been dynamically
-// allocated and must not be deleted by it's creator.
 MockTimer::MockTimer(MockDispatcher* dispatcher) : MockTimer() {
   dispatcher_ = dispatcher;
   EXPECT_CALL(*dispatcher, createTimer_(_))
       .WillOnce(DoAll(SaveArg<0>(&callback_), Return(this)))
       .RetiresOnSaturation();
+  ON_CALL(*this, enableTimer(_, _))
+      .WillByDefault(Invoke([&](const std::chrono::milliseconds&, const ScopeTrackedObject* scope) {
+        enabled_ = true;
+        scope_ = scope;
+      }));
+  ON_CALL(*this, disableTimer()).WillByDefault(Assign(&enabled_, false));
+  ON_CALL(*this, enabled()).WillByDefault(ReturnPointee(&enabled_));
 }
 
 MockTimer::~MockTimer() {
@@ -55,10 +70,15 @@ MockTimer::~MockTimer() {
   }
 }
 
-MockSchedulableCallback::~MockSchedulableCallback() = default;
+MockSchedulableCallback::~MockSchedulableCallback() {
+  if (destroy_cb_) {
+    destroy_cb_->Call();
+  }
+}
 
-MockSchedulableCallback::MockSchedulableCallback(MockDispatcher* dispatcher)
-    : dispatcher_(dispatcher) {
+MockSchedulableCallback::MockSchedulableCallback(MockDispatcher* dispatcher,
+                                                 testing::MockFunction<void()>* destroy_cb)
+    : dispatcher_(dispatcher), destroy_cb_(destroy_cb) {
   EXPECT_CALL(*dispatcher, createSchedulableCallback_(_))
       .WillOnce(DoAll(SaveArg<0>(&callback_), Return(this)))
       .RetiresOnSaturation();

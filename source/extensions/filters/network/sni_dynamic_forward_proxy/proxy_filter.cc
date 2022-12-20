@@ -1,11 +1,11 @@
-#include "extensions/filters/network/sni_dynamic_forward_proxy/proxy_filter.h"
+#include "source/extensions/filters/network/sni_dynamic_forward_proxy/proxy_filter.h"
 
 #include "envoy/network/connection.h"
 #include "envoy/network/filter.h"
 #include "envoy/upstream/thread_local_cluster.h"
 
-#include "common/common/assert.h"
-#include "common/tcp_proxy/tcp_proxy.h"
+#include "source/common/common/assert.h"
+#include "source/common/tcp_proxy/tcp_proxy.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -33,7 +33,7 @@ Network::FilterStatus ProxyFilter::onNewConnection() {
     return Network::FilterStatus::Continue;
   }
 
-  circuit_breaker_ = config_->cache().canCreateDnsRequest(absl::nullopt);
+  circuit_breaker_ = config_->cache().canCreateDnsRequest();
 
   if (circuit_breaker_ == nullptr) {
     ENVOY_CONN_LOG(debug, "pending request overflow", read_callbacks_->connection());
@@ -43,7 +43,7 @@ Network::FilterStatus ProxyFilter::onNewConnection() {
 
   uint32_t default_port = config_->port();
 
-  auto result = config_->cache().loadDnsCacheEntry(sni, default_port, *this);
+  auto result = config_->cache().loadDnsCacheEntry(sni, default_port, false, *this);
 
   cache_load_handle_ = std::move(result.handle_);
   if (cache_load_handle_ == nullptr) {
@@ -51,32 +51,31 @@ Network::FilterStatus ProxyFilter::onNewConnection() {
   }
 
   switch (result.status_) {
-  case LoadDnsCacheEntryStatus::InCache: {
+  case LoadDnsCacheEntryStatus::InCache:
     ASSERT(cache_load_handle_ == nullptr);
     ENVOY_CONN_LOG(debug, "DNS cache entry already loaded, continuing",
                    read_callbacks_->connection());
     return Network::FilterStatus::Continue;
-  }
-  case LoadDnsCacheEntryStatus::Loading: {
+  case LoadDnsCacheEntryStatus::Loading:
     ASSERT(cache_load_handle_ != nullptr);
     ENVOY_CONN_LOG(debug, "waiting to load DNS cache entry", read_callbacks_->connection());
+    read_callbacks_->connection().readDisable(true);
     return Network::FilterStatus::StopIteration;
-  }
-  case LoadDnsCacheEntryStatus::Overflow: {
+  case LoadDnsCacheEntryStatus::Overflow:
     ASSERT(cache_load_handle_ == nullptr);
     ENVOY_CONN_LOG(debug, "DNS cache overflow", read_callbacks_->connection());
     read_callbacks_->connection().close(Network::ConnectionCloseType::NoFlush);
     return Network::FilterStatus::StopIteration;
   }
-  }
 
-  NOT_REACHED_GCOVR_EXCL_LINE;
+  PANIC_DUE_TO_CORRUPT_ENUM;
 }
 
-void ProxyFilter::onLoadDnsCacheComplete() {
+void ProxyFilter::onLoadDnsCacheComplete(const Common::DynamicForwardProxy::DnsHostInfoSharedPtr&) {
   ENVOY_CONN_LOG(debug, "load DNS cache complete, continuing", read_callbacks_->connection());
   ASSERT(circuit_breaker_ != nullptr);
   circuit_breaker_.reset();
+  read_callbacks_->connection().readDisable(false);
   read_callbacks_->continueReading();
 }
 

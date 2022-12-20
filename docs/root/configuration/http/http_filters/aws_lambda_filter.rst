@@ -4,14 +4,14 @@
 AWS Lambda
 ==========
 
+* This filter should be configured with the type URL ``type.googleapis.com/envoy.extensions.filters.http.aws_lambda.v3.Config``.
 * :ref:`v3 API reference <envoy_v3_api_msg_extensions.filters.http.aws_lambda.v3.Config>`
-* This filter should be configured with the name *envoy.filters.http.aws_lambda*.
 
 .. attention::
 
   The AWS Lambda filter is currently under active development.
 
-The HTTP AWS Lambda filter is used to trigger an AWS Lambda function from a standard HTTP/1.x or HTTP/2 request.
+The HTTP AWS Lambda filter is used to trigger an AWS Lambda function from a standard HTTP request.
 It supports a few options to control whether to pass through the HTTP request payload as is or to wrap it in a JSON
 schema.
 
@@ -22,7 +22,8 @@ If :ref:`payload_passthrough <envoy_v3_api_field_extensions.filters.http.aws_lam
 However, if :ref:`payload_passthrough <envoy_v3_api_field_extensions.filters.http.aws_lambda.v3.Config.payload_passthrough>`
 is set to ``false``, then the HTTP request is transformed to a JSON payload with the following schema:
 
-.. code-block::
+.. code-block:: json
+   :force:
 
     {
         "rawPath": "/path/to/resource",
@@ -50,7 +51,8 @@ Otherwise, the body of HTTP request is added to the JSON payload as is.
 
 On the other end, the response of the Lambda function must conform to the following schema:
 
-.. code-block::
+.. code-block:: json
+   :force:
 
     {
         "statusCode": ...
@@ -187,13 +189,12 @@ Statistics
 ----------
 
 The AWS Lambda filter outputs statistics in the *http.<stat_prefix>.aws_lambda.* namespace. The
-:ref:`stat prefix <envoy_api_field_config.filter.network.http_connection_manager.v2.HttpConnectionManager.stat_prefix>`
+| :ref:`stat prefix <envoy_v3_api_field_extensions.filters.network.http_connection_manager.v3.HttpConnectionManager.stat_prefix>`
 comes from the owning HTTP connection manager.
 
 .. csv-table::
   :header: Name, Type, Description
   :widths: 1, 1, 2
 
-  server_error, Counter, Total requests that returned invalid JSON response (see :ref:`payload_passthrough <envoy_api_msg_config.filter.http.aws_lambda.v2alpha.config>`)
+  server_error, Counter, Total requests that returned invalid JSON response (see :ref:`payload_passthrough <envoy_v3_api_msg_extensions.filters.http.aws_lambda.v3.Config>`)
   upstream_rq_payload_size, Histogram, Size in bytes of the request after JSON-tranformation (if any).
-

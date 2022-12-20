@@ -12,10 +12,10 @@
 #include "envoy/server/access_log_config.h"
 #include "envoy/type/v3/percent.pb.h"
 
-#include "common/common/matchers.h"
-#include "common/grpc/status.h"
-#include "common/http/header_utility.h"
-#include "common/protobuf/protobuf.h"
+#include "source/common/common/matchers.h"
+#include "source/common/grpc/status.h"
+#include "source/common/http/header_utility.h"
+#include "source/common/protobuf/protobuf.h"
 
 #include "absl/container/node_hash_set.h"
 #include "absl/hash/hash.h"
@@ -269,7 +269,7 @@ public:
   virtual FilterPtr createFilter(const envoy::config::accesslog::v3::ExtensionFilter& config,
                                  Runtime::Loader& runtime, Random::RandomGenerator& random) PURE;
 
-  std::string category() const override { return "envoy.access_logger.extension_filters"; }
+  std::string category() const override { return "envoy.access_loggers.extension_filters"; }
 };
 
 /**
@@ -278,10 +278,19 @@ public:
 class AccessLogFactory {
 public:
   /**
-   * Read a filter definition from proto and instantiate an Instance.
+   * Read a filter definition from proto and instantiate an Instance. This method is used
+   * to create access log instances that need access to listener properties.
+   */
+  static InstanceSharedPtr
+  fromProto(const envoy::config::accesslog::v3::AccessLog& config,
+            Server::Configuration::ListenerAccessLogFactoryContext& context);
+
+  /**
+   * Read a filter definition from proto and instantiate an Instance. This method does not
+   * have access to listener properties, for example for access loggers of admin interface.
    */
   static InstanceSharedPtr fromProto(const envoy::config::accesslog::v3::AccessLog& config,
-                                     Server::Configuration::FactoryContext& context);
+                                     Server::Configuration::CommonFactoryContext& context);
 };
 
 } // namespace AccessLog

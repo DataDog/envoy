@@ -6,9 +6,8 @@
 #include "envoy/stats/scope.h"
 #include "envoy/stats/stats_macros.h"
 
-#include "common/common/logger.h"
-
-#include "extensions/common/proxy_protocol/proxy_protocol_header.h"
+#include "source/common/common/logger.h"
+#include "source/extensions/common/proxy_protocol/proxy_protocol_header.h"
 
 #include "absl/container/flat_hash_map.h"
 #include "proxy_protocol_header.h"
@@ -61,13 +60,22 @@ public:
    */
   size_t numberOfNeededTlvTypes() const;
 
+  /**
+   * Filter configuration that determines if we should pass-through requests without
+   * proxy protocol. Should only be configured to true for trusted downstreams.
+   */
+  bool allowRequestsWithoutProxyProtocol() const;
+
 private:
   absl::flat_hash_map<uint8_t, KeyValuePair> tlv_types_;
+  const bool allow_requests_without_proxy_protocol_;
 };
 
 using ConfigSharedPtr = std::shared_ptr<Config>;
 
-enum ProxyProtocolVersion { Unknown = -1, InProgress = -2, V1 = 1, V2 = 2 };
+enum ProxyProtocolVersion { Unknown = 0, V1 = 1, V2 = 2 };
+
+enum class ReadOrParseState { Done, TryAgainLater, Error, SkipFilter };
 
 /**
  * Implementation the PROXY Protocol listener filter
@@ -85,6 +93,8 @@ public:
 
   // Network::ListenerFilter
   Network::FilterStatus onAccept(Network::ListenerFilterCallbacks& cb) override;
+  Network::FilterStatus onData(Network::ListenerFilterBuffer& buffer) override;
+  size_t maxReadBytes() const override { return max_proxy_protocol_len_; }
 
 private:
   static const size_t MAX_PROXY_PROTO_LEN_V2 =
@@ -92,57 +102,37 @@ private:
   static const size_t MAX_PROXY_PROTO_LEN_V1 = 108;
 
   void onRead();
-  void onReadWorker();
+  ReadOrParseState parseBuffer(Network::ListenerFilterBuffer& buffer);
 
   /**
    * Helper function that attempts to read the proxy header
    * (delimited by \r\n if V1 format, or with length if V2)
-   * throws EnvoyException on any socket errors.
-   * @return bool true valid header, false if more data is needed.
+   * @return ReadOrParseState
    */
-  bool readProxyHeader(Network::IoHandle& io_handle);
+  ReadOrParseState readProxyHeader(Network::ListenerFilterBuffer& buffer);
+
+  bool parseTlvs(const uint8_t* buf, size_t len);
+  ReadOrParseState readExtensions(Network::ListenerFilterBuffer& buffer);
 
   /**
-   * Parse (and discard unknown) header extensions (until hdr.extensions_length == 0)
+   * Given a char * & len, parse the header as per spec.
+   * @return bool true if parsing succeeded, false if parsing failed.
    */
-  bool parseExtensions(Network::IoHandle& io_handle, uint8_t* buf, size_t buf_size,
-                       size_t* buf_off = nullptr);
-  void parseTlvs(const std::vector<uint8_t>& tlvs);
-  bool readExtensions(Network::IoHandle& io_handle);
-
-  /**
-   * Given a char * & len, parse the header as per spec
-   */
-  void parseV1Header(char* buf, size_t len);
-  void parseV2Header(char* buf);
-  size_t lenV2Address(char* buf);
+  bool parseV1Header(const char* buf, size_t len);
+  bool parseV2Header(const char* buf);
+  absl::optional<size_t> lenV2Address(const char* buf);
 
   Network::ListenerFilterCallbacks* cb_{};
-
-  // The offset in buf_ that has been fully read
-  size_t buf_off_{};
 
   // The index in buf_ where the search for '\r\n' should continue from
   size_t search_index_{1};
 
   ProxyProtocolVersion header_version_{Unknown};
 
-  // Stores the portion of the first line that has been read so far.
-  char buf_[MAX_PROXY_PROTO_LEN_V2];
-
-  /**
-   * Store the extension TLVs if they need to be read.
-   */
-  std::vector<uint8_t> buf_tlv_;
-
-  /**
-   * The index in buf_tlv_ that has been fully read.
-   */
-  size_t buf_tlv_off_{};
-
   ConfigSharedPtr config_;
 
   absl::optional<WireHeader> proxy_protocol_header_;
+  size_t max_proxy_protocol_len_{MAX_PROXY_PROTO_LEN_V2};
 };
 
 } // namespace ProxyProtocol

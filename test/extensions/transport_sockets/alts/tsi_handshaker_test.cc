@@ -1,4 +1,4 @@
-#include "extensions/transport_sockets/alts/tsi_handshaker.h"
+#include "source/extensions/transport_sockets/alts/tsi_handshaker.h"
 
 #include "test/mocks/event/mocks.h"
 
@@ -86,19 +86,27 @@ TEST_F(TsiHandshakerTest, DoHandshake) {
 
   tsi_peer client_peer;
   EXPECT_EQ(TSI_OK, tsi_handshaker_result_extract_peer(client_result.get(), &client_peer));
-  EXPECT_EQ(1, client_peer.property_count);
+  EXPECT_EQ(2, client_peer.property_count);
   EXPECT_STREQ("certificate_type", client_peer.properties[0].name);
   absl::string_view client_certificate_type{client_peer.properties[0].value.data,
                                             client_peer.properties[0].value.length};
   EXPECT_EQ("FAKE", client_certificate_type);
+  EXPECT_STREQ("security_level", client_peer.properties[1].name);
+  absl::string_view client_security_level{client_peer.properties[1].value.data,
+                                          client_peer.properties[1].value.length};
+  EXPECT_EQ("TSI_SECURITY_NONE", client_security_level);
 
   tsi_peer server_peer;
   EXPECT_EQ(TSI_OK, tsi_handshaker_result_extract_peer(server_result.get(), &server_peer));
-  EXPECT_EQ(1, server_peer.property_count);
+  EXPECT_EQ(2, server_peer.property_count);
   EXPECT_STREQ("certificate_type", server_peer.properties[0].name);
   absl::string_view server_certificate_type{server_peer.properties[0].value.data,
                                             server_peer.properties[0].value.length};
   EXPECT_EQ("FAKE", server_certificate_type);
+  EXPECT_STREQ("security_level", server_peer.properties[1].name);
+  absl::string_view server_security_level{server_peer.properties[1].value.data,
+                                          server_peer.properties[1].value.length};
+  EXPECT_EQ("TSI_SECURITY_NONE", server_security_level);
 
   tsi_peer_destruct(&client_peer);
   tsi_peer_destruct(&server_peer);
@@ -150,7 +158,7 @@ TEST_F(TsiHandshakerTest, DeleteOnDone) {
   handshaker->deferredDelete();
 
   // Make sure the handshaker is not in dispatcher_ queue, since the next call is not done.
-  EXPECT_NE(dispatcher_.to_delete_.back().get(), handshaker.get());
+  EXPECT_TRUE(dispatcher_.to_delete_.empty());
 
   // After deferredDelete, the callback should be never invoked, in real use it might be already
   // a dangling pointer.

@@ -37,8 +37,8 @@
 * Triage GitHub issues and perform pull request reviews for other maintainers and the community.
   The areas of specialization listed in [OWNERS.md](OWNERS.md) can be used to help with routing
   an issue/question to the right person.
-* Triage build issues - file issues for known flaky builds or bugs, and either fix or find someone
-  to fix any master build breakages.
+* Triage build and CI issues. Monitor #envoy-ci and #test-flaky and file issues for failing builds,
+  flaky tests or new bugs, and either fix or find someone to fix any main build breakages.
 * During GitHub issue triage, apply all applicable [labels](https://github.com/envoyproxy/envoy/labels)
   to each new issue. Labels are extremely useful for future issue follow up. Which labels to apply
   is somewhat subjective so just use your best judgment. A few of the most important labels that are
@@ -68,82 +68,6 @@
 [here](https://calendar.google.com/calendar/embed?src=d6glc0l5rc3v235q9l2j29dgovh3dn48%40import.calendar.google.com&ctz=America%2FNew_York)
 or you can subscribe to the iCal feed [here](webcal://kubernetes.app.opsgenie.com/webapi/webcal/getRecentSchedule?webcalToken=39dd1a892faa8d0d689f889b9d09ae787355ddff894396546726a5a02bac5b26&scheduleId=a3505963-c064-4c97-8865-947dfcb06060)
 
-## Cutting a release
-
-* We do releases every 3 months, at the end of each quarter, as described in the
-  [release schedule](RELEASES.md#release-schedule).
-* Take a look at open issues tagged with the current release, by
-  [searching](https://github.com/envoyproxy/envoy/issues) for
-  "is:open is:issue milestone:[current milestone]" and either hold off until
-  they are fixed or bump them to the next milestone.
-* Begin marshalling the ongoing PR flow in this repo. Ask maintainers to hold off merging any
-  particularly risky PRs until after the release is tagged. This is because we aim for master to be
-  at release candidate quality at all times.
-* Do a final check of the [release notes](docs/root/version_history/current.rst):
-  * Make any needed corrections (grammar, punctuation, formatting, etc.).
-  * Check to see if any security/stable version release notes are duplicated in
-    the major version release notes. These should not be duplicated.
-  * If the "Deprecated" section is empty, delete it.
-  * Remove the "Pending" tags and add dates to the top of the [release notes for this version](docs/root/version_history/current.rst).
-  * Switch the [VERSION](VERSION) from a "dev" variant to a final variant. E.g., "1.6.0-dev" to
-    "1.6.0".
-  * Update the [RELEASES](RELEASES.md) doc with the relevant dates. Now, or after you cut the
-    release, please also make sure there's a stable maintainer signed up for next quarter,
-    and the deadline for the next release is documented in the release schedule.
-  * Get a review and merge.
-* Wait for tests to pass on [master](https://dev.azure.com/cncf/envoy/_build).
-* Create a [tagged release](https://github.com/envoyproxy/envoy/releases). The release should
-  start with "v" and be followed by the version number. E.g., "v1.6.0". **This must match the
-  [VERSION](VERSION).**
-* From the envoy [landing page](https://github.com/envoyproxy/envoy) use the branch drop-down to create a branch
-  from the tagged release, e.g. "release/v1.6". It will be used for the
-  [stable releases](RELEASES.md#stable-releases).
-* Monitor the AZP tag build to make sure that the final docker images get pushed along with
-  the final docs. The final documentation will end up in the
-  [envoyproxy.github.io repository](https://github.com/envoyproxy/envoyproxy.github.io/tree/master/docs/envoy).
-* Update the website ([example PR](https://github.com/envoyproxy/envoyproxy.github.io/pull/148)) for the new release.
-* Craft a witty/uplifting email and send it to all the email aliases including envoy-announce@.
-* Make sure we tweet the new release: either have Matt do it or email social@cncf.io and ask them to do an Envoy account
-  post.
-* Do a new PR to setup the next version
-  * Update [VERSION](VERSION) to the next development release. E.g., "1.7.0-dev". 
-  * `git mv docs/root/version_history/current.rst docs/root/version_history/v1.6.0.rst`, filling in the previous
-    release version number in the filename, and add an entry for the new file in the `toctree` in 
-    [version_history.rst](docs/root/version_history/version_history.rst).
-  * Create a new "current" version history file at the [release
-  notes](docs/root/version_history/current.rst) for the following version. E.g., "1.7.0 (pending)". Use
-  this text as the template for the new file:
-```
-1.7.0 (Pending)
-===============
-
-Incompatible Behavior Changes
------------------------------
-*Changes that are expected to cause an incompatibility if applicable; deployment changes are likely required*
-
-Minor Behavior Changes
-----------------------
-*Changes that may cause incompatibilities for some users, but should not for most*
-
-Bug Fixes
----------
-*Changes expected to improve the state of the world and are unlikely to have negative effects*
-
-Removed Config or Runtime
--------------------------
-*Normally occurs at the end of the* :ref:`deprecation period <deprecated>`
-
-New Features
-------------
-
-Deprecated
-----------
-```
-* Run the deprecate_versions.py script (e.g. `sh tools/deprecate_version/deprecate_version.sh`)
-  to file tracking issues for runtime guarded code which can be removed.
-* Check source/common/runtime/runtime_features.cc and see if any runtime guards in
-  disabled_runtime_features should be reassessed, and ping on the relevant issues.
-
 ## When does a maintainer lose maintainer status
 
 If a maintainer is no longer interested or cannot perform the maintainer duties listed above, they
@@ -167,14 +91,14 @@ developments and expect to be active in this space in the near future. API sheph
 take on API shepherd review load and participate in meetings. They should be active on Slack `#xds`
 and responsive to GitHub issues and PRs on which they are tagged.
 
-The API shepherds are distinct to the [UDPA working
-group](https://github.com/cncf/udpa/blob/master/README.md), which aims to evolve xDS directionally
+The API shepherds are distinct to the [xDS working
+group](https://github.com/cncf/xds/blob/main/README.md), which aims to evolve xDS directionally
 towards a universal dataplane API. API shepherds are responsible for the execution of the xDS
-day-to-day and guiding xDS implementation changes. Proposals from UDPA-WG will be aligned with the
-xDS API shepherds to ensure that xDS is heading towards the UDPA goal. xDS API shepherds operate
-under the [envoyproxy](https://github.com/envoyproxy) organization but are expected to keep in mind
-the needs of all xDS clients (currently Envoy and gRPC, but we are aware of other in-house
-implementations) and the goals of UDPA-WG.
+day-to-day and guiding xDS implementation changes. Proposals from xDS-WG will be aligned with the
+xDS API shepherds to ensure that xDS is heading towards the xDS goal of client and server neutral
+xDS. xDS API shepherds operate under the [envoyproxy](https://github.com/envoyproxy) organization
+but are expected to keep in mind the needs of all xDS clients (currently Envoy and gRPC, but we are
+aware of other in-house implementations) and the goals of xDS-WG.
 
 If you wish to become an API shepherd and satisfy the above criteria, please contact an existing
 API shepherd. We will factor in PR and review history to determine if the above API shepherd

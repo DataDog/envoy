@@ -3,10 +3,8 @@
 #include "envoy/config/core/v3/base.pb.h"
 #include "envoy/http/filter.h"
 
+#include "source/extensions/filters/http/aws_lambda/aws_lambda_filter.h"
 #include "source/extensions/filters/http/aws_lambda/request_response.pb.validate.h"
-
-#include "extensions/filters/http/aws_lambda/aws_lambda_filter.h"
-#include "extensions/filters/http/well_known_names.h"
 
 #include "test/extensions/common/aws/mocks.h"
 #include "test/mocks/http/mocks.h"
@@ -76,9 +74,11 @@ TEST_F(AwsLambdaFilterTest, DecodingHeaderStopIteration) {
  */
 TEST_F(AwsLambdaFilterTest, HeaderOnlyShouldContinue) {
   setupFilter({arn_, InvocationMode::Synchronous, true /*passthrough*/});
-  EXPECT_CALL(*signer_, sign(_));
+  EXPECT_CALL(*signer_, signEmptyPayload(An<Http::RequestHeaderMap&>()));
   Http::TestRequestHeaderMapImpl input_headers;
   const auto result = filter_->decodeHeaders(input_headers, true /*end_stream*/);
+  EXPECT_EQ("/2015-03-31/functions/arn:aws:lambda:us-west-2:1337:function:fun/invocations",
+            input_headers.getPathValue());
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, result);
 
   Http::TestResponseHeaderMapImpl response_headers;
@@ -102,8 +102,7 @@ TEST_F(AwsLambdaFilterTest, PerRouteConfigWrongClusterMetadata) {
 
   setupFilter({arn_, InvocationMode::Synchronous, true /*passthrough*/});
   FilterSettings route_settings{arn_, InvocationMode::Synchronous, true /*passthrough*/};
-  ON_CALL(decoder_callbacks_.route_->route_entry_,
-          perFilterConfig(HttpFilterNames::get().AwsLambda))
+  ON_CALL(*decoder_callbacks_.route_, mostSpecificPerFilterConfig(_))
       .WillByDefault(Return(&route_settings));
 
   ON_CALL(*decoder_callbacks_.cluster_info_, metadata()).WillByDefault(ReturnRef(metadata));
@@ -125,8 +124,7 @@ TEST_F(AwsLambdaFilterTest, PerRouteConfigWrongClusterMetadata) {
 TEST_F(AwsLambdaFilterTest, PerRouteConfigCorrectClusterMetadata) {
   setupFilter({arn_, InvocationMode::Synchronous, true /*passthrough*/});
   FilterSettings route_settings{arn_, InvocationMode::Synchronous, true /*passthrough*/};
-  ON_CALL(decoder_callbacks_.route_->route_entry_,
-          perFilterConfig(HttpFilterNames::get().AwsLambda))
+  ON_CALL(*decoder_callbacks_.route_, mostSpecificPerFilterConfig(_))
       .WillByDefault(Return(&route_settings));
 
   Http::TestRequestHeaderMapImpl headers;
@@ -184,6 +182,8 @@ TEST_F(AwsLambdaFilterTest, DecodeDataShouldSign) {
   EXPECT_CALL(*signer_, sign(An<Http::RequestHeaderMap&>(), An<const std::string&>()));
 
   const auto data_result = filter_->decodeData(buffer, true /*end_stream*/);
+  EXPECT_EQ("/2015-03-31/functions/arn:aws:lambda:us-west-2:1337:function:fun/invocations",
+            headers.getPathValue());
   EXPECT_EQ(Http::FilterDataStatus::Continue, data_result);
 }
 
@@ -225,7 +225,8 @@ TEST_F(AwsLambdaFilterTest, DecodeHeadersOnlyRequestWithJsonOn) {
   headers.addCopy("x-custom-header", "unit");
   headers.addCopy("x-custom-header", "test");
   const auto header_result = filter_->decodeHeaders(headers, true /*end_stream*/);
-
+  EXPECT_EQ("/2015-03-31/functions/arn:aws:lambda:us-west-2:1337:function:fun/invocations",
+            headers.getPathValue());
   EXPECT_EQ(Http::FilterHeadersStatus::Continue, header_result);
 
   // Assert it's not empty
@@ -519,6 +520,7 @@ TEST_F(AwsLambdaFilterTest, EncodeDataJsonModeTransformToHttp) {
 
   EXPECT_FALSE(headers.has(":other"));
   EXPECT_EQ("awesome value", headers.get_("x-awesome-header"));
+  EXPECT_EQ("application/json", headers.get_("content-type"));
 
   std::vector<std::string> cookies;
   headers.iterate([&cookies](const Http::HeaderEntry& entry) {
@@ -529,6 +531,40 @@ TEST_F(AwsLambdaFilterTest, EncodeDataJsonModeTransformToHttp) {
   });
 
   EXPECT_THAT(cookies, ElementsAre("session-id=42; Secure; HttpOnly", "user=joe"));
+}
+
+/**
+ * encodeData() data in JSON mode should respect content-type header.
+ */
+TEST_F(AwsLambdaFilterTest, EncodeDataJsonModeContentTypeHeader) {
+  setupFilter({arn_, InvocationMode::Synchronous, false /*passthrough*/});
+  filter_->resolveSettings();
+  Http::TestResponseHeaderMapImpl headers;
+  headers.setStatus(200);
+  filter_->encodeHeaders(headers, false /*end_stream*/);
+
+  constexpr auto json_response = R"EOF(
+  {
+      "statusCode": 201,
+      "headers": {"content-type": "text/plain"}
+  }
+  )EOF";
+
+  Buffer::OwnedImpl encoded_buf;
+  encoded_buf.add(json_response);
+  auto on_modify_encoding_buffer = [&encoded_buf](std::function<void(Buffer::Instance&)> cb) {
+    cb(encoded_buf);
+  };
+  EXPECT_CALL(encoder_callbacks_, encodingBuffer).WillRepeatedly(Return(&encoded_buf));
+  EXPECT_CALL(encoder_callbacks_, modifyEncodingBuffer)
+      .WillRepeatedly(Invoke(on_modify_encoding_buffer));
+
+  auto result = filter_->encodeData(encoded_buf, true /*end_stream*/);
+  EXPECT_EQ(Http::FilterDataStatus::Continue, result);
+
+  ASSERT_NE(nullptr, headers.Status());
+  EXPECT_EQ("201", headers.getStatusValue());
+  EXPECT_EQ("text/plain", headers.get_("content-type"));
 }
 
 /**

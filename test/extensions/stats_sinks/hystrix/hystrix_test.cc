@@ -2,9 +2,8 @@
 #include <memory>
 #include <sstream>
 
-#include "common/json/json_loader.h"
-
-#include "extensions/stat_sinks/hystrix/hystrix.h"
+#include "source/common/json/json_loader.h"
+#include "source/extensions/stat_sinks/hystrix/hystrix.h"
 
 #include "test/mocks/network/mocks.h"
 #include "test/mocks/server/admin.h"
@@ -83,9 +82,9 @@ public:
     ON_CALL(error_4xx_counter_, value()).WillByDefault(Return((i + 1) * error_4xx_step));
     ON_CALL(retry_4xx_counter_, value()).WillByDefault(Return((i + 1) * error_4xx_retry_step));
     ON_CALL(success_counter_, value()).WillByDefault(Return((i + 1) * success_step));
-    cluster_info_->stats().upstream_rq_timeout_.add(timeout_step);
-    cluster_info_->stats().upstream_rq_per_try_timeout_.add(timeout_retry_step);
-    cluster_info_->stats().upstream_rq_pending_overflow_.add(rejected_step);
+    cluster_info_->trafficStats().upstream_rq_timeout_.add(timeout_step);
+    cluster_info_->trafficStats().upstream_rq_per_try_timeout_.add(timeout_retry_step);
+    cluster_info_->trafficStats().upstream_rq_pending_overflow_.add(rejected_step);
   }
 
   NiceMock<Upstream::MockClusterMockPrioritySet> cluster_;
@@ -128,9 +127,9 @@ public:
 
   void createClusterAndCallbacks() {
     // Set cluster.
-    cluster_map_.emplace(cluster1_name_, cluster1_.cluster_);
+    cluster_maps_.active_clusters_.emplace(cluster1_name_, cluster1_.cluster_);
     ON_CALL(server_, clusterManager()).WillByDefault(ReturnRef(cluster_manager_));
-    ON_CALL(cluster_manager_, clusters()).WillByDefault(Return(cluster_map_));
+    ON_CALL(cluster_manager_, clusters()).WillByDefault(Return(cluster_maps_));
 
     ON_CALL(callbacks_, encodeData(_, _)).WillByDefault(Invoke([&](Buffer::Instance& data, bool) {
       // Set callbacks to send data to buffer. This will append to the end of the buffer, so
@@ -141,15 +140,15 @@ public:
 
   void addClusterToMap(const std::string& cluster_name,
                        NiceMock<Upstream::MockClusterMockPrioritySet>& cluster) {
-    cluster_map_.emplace(cluster_name, cluster);
-    // Redefining since cluster_map_ is returned by value.
-    ON_CALL(cluster_manager_, clusters()).WillByDefault(Return(cluster_map_));
+    cluster_maps_.active_clusters_.emplace(cluster_name, cluster);
+    // Redefining since cluster_maps_ is returned by value.
+    ON_CALL(cluster_manager_, clusters()).WillByDefault(Return(cluster_maps_));
   }
 
   void removeClusterFromMap(const std::string& cluster_name) {
-    cluster_map_.erase(cluster_name);
-    // Redefining since cluster_map_ is returned by value.
-    ON_CALL(cluster_manager_, clusters()).WillByDefault(Return(cluster_map_));
+    cluster_maps_.active_clusters_.erase(cluster_name);
+    // Redefining since cluster_maps_ is returned by value.
+    ON_CALL(cluster_manager_, clusters()).WillByDefault(Return(cluster_maps_));
   }
 
   void addSecondClusterHelper(Buffer::OwnedImpl& buffer) {
@@ -245,7 +244,7 @@ public:
 
   NiceMock<Http::MockStreamDecoderFilterCallbacks> callbacks_;
   NiceMock<Server::Configuration::MockServerFactoryContext> server_;
-  Upstream::ClusterManager::ClusterInfoMap cluster_map_;
+  Upstream::ClusterManager::ClusterInfoMaps cluster_maps_;
   Buffer::OwnedImpl cluster_stats_buffer_;
 
   std::unique_ptr<HystrixSink> sink_;
@@ -508,7 +507,6 @@ TEST_F(HystrixSinkTest, HystrixEventStreamHandler) {
   sink_->registerConnection(&callbacks_);
 
   // This value doesn't matter in handlerHystrixEventStream
-  absl::string_view path_and_query;
 
   Http::TestResponseHeaderMapImpl response_headers;
 
@@ -521,13 +519,15 @@ TEST_F(HystrixSinkTest, HystrixEventStreamHandler) {
   ON_CALL(admin_stream_mock, getDecoderFilterCallbacks()).WillByDefault(ReturnRef(callbacks_));
   ON_CALL(admin_stream_mock, http1StreamEncoderOptions())
       .WillByDefault(Return(Http::Http1StreamEncoderOptionsOptRef(stream_encoder_options)));
-  ON_CALL(callbacks_, connection()).WillByDefault(Return(&connection_mock));
-  ON_CALL(connection_mock, remoteAddress()).WillByDefault(ReturnRef(addr_instance_));
+  ON_CALL(callbacks_, connection())
+      .WillByDefault(Return(OptRef<const Network::Connection>{connection_mock}));
+  connection_mock.stream_info_.downstream_connection_info_provider_->setRemoteAddress(
+      addr_instance_);
 
   EXPECT_CALL(stream_encoder_options, disableChunkEncoding());
-  ASSERT_EQ(sink_->handlerHystrixEventStream(path_and_query, response_headers,
-                                             cluster_stats_buffer_, admin_stream_mock),
-            Http::Code::OK);
+  ASSERT_EQ(
+      sink_->handlerHystrixEventStream(response_headers, cluster_stats_buffer_, admin_stream_mock),
+      Http::Code::OK);
 
   // Check that response_headers has been set correctly
   EXPECT_EQ(response_headers.ContentType()->value(), "text/event-stream");

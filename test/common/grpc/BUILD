@@ -15,6 +15,7 @@ envoy_cc_test(
     name = "async_client_impl_test",
     srcs = ["async_client_impl_test.cc"],
     deps = [
+        "//source/common/event:dispatcher_lib",
         "//source/common/grpc:async_client_lib",
         "//test/mocks/http:http_mocks",
         "//test/mocks/tracing:tracing_mocks",
@@ -35,6 +36,7 @@ envoy_cc_test(
         "//test/mocks/thread_local:thread_local_mocks",
         "//test/mocks/upstream:cluster_manager_mocks",
         "//test/mocks/upstream:cluster_priority_set_mocks",
+        "//test/test_common:test_runtime_lib",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
@@ -132,6 +134,7 @@ envoy_cc_test_library(
     deps = [
         "//source/common/common:assert_lib",
         "//test/mocks/secret:secret_mocks",
+        "//test/test_common:environment_lib",
         "//test/test_common:utility_lib",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
     ],
@@ -148,6 +151,7 @@ envoy_cc_test_library(
         "//source/common/grpc:context_lib",
         "//source/common/http:context_lib",
         "//source/common/http/http2:conn_pool_lib",
+        "//source/common/router:context_lib",
         "//test/integration:integration_lib",
         "//test/mocks/local_info:local_info_mocks",
         "//test/mocks/server:transport_socket_factory_context_mocks",
@@ -170,7 +174,6 @@ envoy_cc_test(
     deps = [
         ":grpc_client_integration_test_harness_lib",
         "//source/common/grpc:async_client_lib",
-        "//source/extensions/grpc_credentials:well_known_names",
         "//source/extensions/grpc_credentials/example:config",
     ] + envoy_select_google_grpc(["//source/common/grpc:google_async_client_lib"]),
 )
@@ -182,5 +185,30 @@ envoy_cc_test_library(
     deps = [
         "//test/test_common:environment_lib",
         "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "buffered_async_client_test",
+    srcs = ["buffered_async_client_test.cc"],
+    deps = [
+        "//source/common/grpc:async_client_lib",
+        "//source/common/grpc:buffered_async_client_lib",
+        "//test/mocks/http:http_mocks",
+        "//test/mocks/tracing:tracing_mocks",
+        "//test/mocks/upstream:cluster_manager_mocks",
+        "//test/proto:helloworld_proto_cc_proto",
+        "//test/test_common:test_time_lib",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
+    name = "buffered_message_ttl_manager_test",
+    srcs = ["buffered_message_ttl_manager_test.cc"],
+    deps = [
+        "//source/common/event:dispatcher_lib",
+        "//source/common/grpc:buffered_message_ttl_manager_lib",
+        "//test/test_common:utility_lib",
     ],
 )

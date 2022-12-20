@@ -3,7 +3,7 @@
 #include "envoy/config/bootstrap/v3/bootstrap.pb.h"
 #include "envoy/config/metrics/v3/stats.pb.h"
 
-#include "common/json/json_loader.h"
+#include "source/common/json/json_loader.h"
 
 #include "test/integration/http_protocol_integration.h"
 #include "test/test_common/utility.h"
@@ -15,9 +15,14 @@ namespace Envoy {
 class IntegrationAdminTest : public HttpProtocolIntegrationTest {
 public:
   void initialize() override {
-    config_helper_.addFilter(ConfigHelper::defaultHealthCheckFilter());
     config_helper_.addConfigModifier(
         [](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
+          auto listener_config = bootstrap.mutable_static_resources()->mutable_listeners(0);
+          auto additional_address = listener_config->add_additional_addresses();
+          envoy::config::core::v3::SocketAddress& socket_address =
+              *additional_address->mutable_address()->mutable_socket_address();
+          socket_address.set_address("127.0.0.2");
+          socket_address.set_port_value(0);
           auto& hist_settings =
               *bootstrap.mutable_stats_config()->mutable_histogram_bucket_settings();
           envoy::config::metrics::v3::HistogramBucketSettings* setting = hist_settings.Add();
@@ -28,14 +33,6 @@ public:
           setting->mutable_buckets()->Add(4);
         });
     HttpIntegrationTest::initialize();
-  }
-
-  void initialize(envoy::config::metrics::v3::StatsMatcher stats_matcher) {
-    config_helper_.addConfigModifier(
-        [stats_matcher](envoy::config::bootstrap::v3::Bootstrap& bootstrap) -> void {
-          *bootstrap.mutable_stats_config()->mutable_stats_matcher() = stats_matcher;
-        });
-    initialize();
   }
 
   absl::string_view request(const std::string port_key, const std::string method,
@@ -76,7 +73,7 @@ public:
     }
 
     // Validate that the stats JSON has expected histograms element.
-    EXPECT_EQ(expected_hist_count, histogram_count);
+    EXPECT_EQ(expected_hist_count, histogram_count) << stats_json;
   }
 };
 

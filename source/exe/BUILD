@@ -2,8 +2,9 @@ load(
     "//bazel:envoy_build_system.bzl",
     "envoy_cc_binary",
     "envoy_cc_library",
-    "envoy_cc_platform_dep",
-    "envoy_cc_posix_library",
+    "envoy_cc_linux_library",
+    "envoy_cc_platform_specific_dep",
+    "envoy_cc_posix_without_linux_library",
     "envoy_cc_win32_library",
     "envoy_package",
 )
@@ -21,6 +22,10 @@ alias(
 
 envoy_cc_binary(
     name = "envoy-static",
+    features = select({
+        "//bazel:windows_opt_build": ["generate_pdb_file"],
+        "//conditions:default": [],
+    }),
     stamped = True,
     deps = [":envoy_main_entry_lib"],
 )
@@ -52,6 +57,7 @@ envoy_cc_library(
     deps = [
         ":envoy_main_common_lib",
         ":platform_impl_lib",
+        ":scm_impl_lib",
     ],
 )
 
@@ -90,15 +96,20 @@ envoy_cc_library(
 envoy_cc_library(
     name = "envoy_common_with_core_extensions_lib",
     deps = [
-        "//source/common/event:libevent_lib",
-        "//source/common/network:utility_lib",
-        "//source/common/stats:stats_lib",
-        "//source/common/stats:thread_local_store_lib",
-        "//source/server:drain_manager_lib",
-        "//source/server:options_lib",
-        "//source/server:server_lib",
-        "//source/server:listener_hooks_lib",
-    ] + envoy_all_core_extensions(),
+               "//source/common/event:libevent_lib",
+               "//source/common/network:utility_lib",
+               "//source/common/stats:stats_lib",
+               "//source/common/stats:thread_local_store_lib",
+               "//source/server:drain_manager_lib",
+               "//source/server:options_lib",
+               "//source/server:server_lib",
+               "//source/server:listener_hooks_lib",
+           ] + envoy_all_core_extensions() +
+           # TODO(rojkov): drop io_uring dependency when it's fully integrated.
+           select({
+               "//bazel:linux": ["//source/common/io:io_uring_impl_lib"],
+               "//conditions:default": [],
+           }),
 )
 
 envoy_cc_library(
@@ -109,6 +120,7 @@ envoy_cc_library(
         ":envoy_common_with_core_extensions_lib",
         ":platform_impl_lib",
         ":process_wide_lib",
+        "//envoy/server:platform_interface",
         "//source/common/api:os_sys_calls_lib",
         "//source/common/common:compiler_requirements_lib",
         "//source/common/common:perf_annotation_lib",
@@ -129,11 +141,11 @@ envoy_cc_library(
     name = "process_wide_lib",
     srcs = ["process_wide.cc"],
     hdrs = ["process_wide.h"],
-    external_deps = ["ares"],
     deps = [
         "//source/common/common:assert_lib",
         "//source/common/event:libevent_lib",
         "//source/common/http/http2:nghttp2_lib",
+        "//source/common/network/dns_resolver:dns_factory_util_lib",
         "//source/server:proto_descriptors_lib",
     ],
 )
@@ -141,21 +153,30 @@ envoy_cc_library(
 envoy_cc_library(
     name = "platform_impl_lib",
     deps = [":platform_header_lib"] +
-           envoy_cc_platform_dep("platform_impl_lib"),
+           envoy_cc_platform_specific_dep("platform_impl_lib"),
 )
 
 envoy_cc_library(
     name = "platform_header_lib",
     hdrs = ["platform_impl.h"],
     deps = [
-        "//include/envoy/filesystem:filesystem_interface",
-        "//include/envoy/thread:thread_interface",
+        "//envoy/server:platform_interface",
     ],
 )
 
-envoy_cc_posix_library(
+envoy_cc_posix_without_linux_library(
     name = "platform_impl_lib",
     srcs = ["posix/platform_impl.cc"],
+    deps = [
+        ":platform_header_lib",
+        "//source/common/common:thread_lib",
+        "//source/common/filesystem:filesystem_lib",
+    ],
+)
+
+envoy_cc_linux_library(
+    name = "platform_impl_lib",
+    srcs = ["linux/platform_impl.cc"],
     deps = [
         ":platform_header_lib",
         "//source/common/common:thread_lib",
@@ -168,10 +189,45 @@ envoy_cc_win32_library(
     srcs = ["win32/platform_impl.cc"],
     deps = [
         ":platform_header_lib",
+        "//source/common/buffer:buffer_lib",
         "//source/common/common:assert_lib",
         "//source/common/common:thread_lib",
+        "//source/common/event:signal_lib",
         "//source/common/filesystem:filesystem_lib",
     ],
+)
+
+envoy_cc_library(
+    name = "scm_impl_lib",
+    srcs = select({
+        "//bazel:windows_x86_64": [
+            "win32/service_base.cc",
+        ],
+        "//conditions:default": [],
+    }),
+    hdrs = select({
+        "//bazel:windows_x86_64": [
+            "win32/service_base.h",
+            "win32/service_status.h",
+        ],
+        "//conditions:default": [],
+    }),
+    include_prefix = "source/exe",
+    strip_include_prefix = select({
+        "//bazel:windows_x86_64": "win32",
+        "//conditions:default": "",
+    }),
+    deps = select({
+        "//bazel:windows_x86_64": [
+            ":main_common_lib",
+            "//source/common/buffer:buffer_lib",
+            "//source/common/common:assert_lib",
+            "//source/common/common:win32_event_logger_impl_lib",
+            "//source/common/common:thread_lib",
+            "//source/common/event:signal_lib",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 envoy_cc_library(

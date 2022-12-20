@@ -1,4 +1,4 @@
-#include "common/http/codec_wrappers.h"
+#include "source/common/http/codec_wrappers.h"
 
 #include "test/mocks/http/mocks.h"
 #include "test/test_common/utility.h"
@@ -10,7 +10,7 @@ namespace Http {
 
 class MockRequestEncoderWrapper : public RequestEncoderWrapper {
 public:
-  MockRequestEncoderWrapper() : RequestEncoderWrapper(inner_encoder_) {}
+  MockRequestEncoderWrapper() : RequestEncoderWrapper(&inner_encoder_) {}
   void onEncodeComplete() override { encode_complete_ = true; }
 
   MockRequestEncoder& innerEncoder() { return inner_encoder_; }

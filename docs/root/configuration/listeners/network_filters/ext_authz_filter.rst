@@ -4,8 +4,8 @@ External Authorization
 ======================
 
 * External authorization :ref:`architecture overview <arch_overview_ext_authz>`
+* This filter should be configured with the type URL ``type.googleapis.com/envoy.extensions.filters.network.ext_authz.v3.ExtAuthz``.
 * :ref:`Network filter v3 API reference <envoy_v3_api_msg_extensions.filters.network.ext_authz.v3.ExtAuthz>`
-* This filter should be configured with the name *envoy.filters.network.ext_authz*.
 
 The external authorization network filter calls an external authorization service to check if the
 incoming request is authorized or not. If the request is deemed unauthorized by the network filter
@@ -43,7 +43,11 @@ A sample filter configuration could be:
   clusters:
     - name: ext-authz
       type: static
-      http2_protocol_options: {}
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
       load_assignment:
         cluster_name: ext-authz
         endpoints:
@@ -53,6 +57,30 @@ A sample filter configuration could be:
                 socket_address:
                   address: 127.0.0.1
                   port_value: 10003
+
+A sample request body to the specified auth service looks like
+
+.. code-block:: json
+
+  {
+    "source":{
+      "address":{
+        "socket_address":{
+          "address": "172.17.0.1",
+          "port_value": 56746
+        }
+      }
+    }
+    "destination":{
+      "service": "www.bing.com",
+      "address":{
+        "socket_address": {
+          "address": "127.0.0.1",
+          "port_value": 10003
+        }
+      }
+    }
+  }
 
 Statistics
 ----------

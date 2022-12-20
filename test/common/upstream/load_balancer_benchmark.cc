@@ -4,16 +4,17 @@
 
 #include "envoy/config/cluster/v3/cluster.pb.h"
 
-#include "common/common/random_generator.h"
-#include "common/memory/stats.h"
-#include "common/upstream/maglev_lb.h"
-#include "common/upstream/ring_hash_lb.h"
-#include "common/upstream/subset_lb.h"
-#include "common/upstream/upstream_impl.h"
+#include "source/common/common/random_generator.h"
+#include "source/common/memory/stats.h"
+#include "source/common/upstream/maglev_lb.h"
+#include "source/common/upstream/ring_hash_lb.h"
+#include "source/common/upstream/subset_lb.h"
+#include "source/common/upstream/upstream_impl.h"
 
 #include "test/benchmark/main.h"
 #include "test/common/upstream/utility.h"
 #include "test/mocks/upstream/cluster_info.h"
+#include "test/test_common/simulated_time_system.h"
 
 #include "benchmark/benchmark.h"
 
@@ -21,7 +22,7 @@ namespace Envoy {
 namespace Upstream {
 namespace {
 
-class BaseTester {
+class BaseTester : public Event::TestUsingSimulatedTime {
 public:
   static constexpr absl::string_view metadata_key = "key";
   // We weight the first weighted_subset_percent of hosts with weight.
@@ -41,9 +42,9 @@ public:
             (*metadata.mutable_filter_metadata())[Config::MetadataFilters::get().ENVOY_LB];
         (*map.mutable_fields())[std::string(metadata_key)] = value;
 
-        hosts.push_back(makeTestHost(info_, url, metadata, effective_weight));
+        hosts.push_back(makeTestHost(info_, url, metadata, simTime(), effective_weight));
       } else {
-        hosts.push_back(makeTestHost(info_, url, effective_weight));
+        hosts.push_back(makeTestHost(info_, url, simTime(), effective_weight));
       }
     }
 
@@ -65,10 +66,12 @@ public:
   PrioritySetImpl priority_set_;
   PrioritySetImpl local_priority_set_;
   Stats::IsolatedStoreImpl stats_store_;
-  ClusterStats stats_{ClusterInfoImpl::generateStats(stats_store_)};
+  ClusterLbStatNames stat_names_{stats_store_.symbolTable()};
+  ClusterLbStats stats_{stat_names_, stats_store_};
   NiceMock<Runtime::MockLoader> runtime_;
   Random::RandomGeneratorImpl random_;
   envoy::config::cluster::v3::Cluster::CommonLbConfig common_config_;
+  envoy::config::cluster::v3::Cluster::RoundRobinLbConfig round_robin_lb_config_;
   std::shared_ptr<MockClusterInfo> info_{new NiceMock<MockClusterInfo>()};
 };
 
@@ -79,7 +82,8 @@ public:
 
   void initialize() {
     lb_ = std::make_unique<RoundRobinLoadBalancer>(priority_set_, &local_priority_set_, stats_,
-                                                   runtime_, random_, common_config_);
+                                                   runtime_, random_, common_config_,
+                                                   round_robin_lb_config_, simTime());
   }
 
   std::unique_ptr<RoundRobinLoadBalancer> lb_;
@@ -90,9 +94,9 @@ public:
   LeastRequestTester(uint64_t num_hosts, uint32_t choice_count) : BaseTester(num_hosts) {
     envoy::config::cluster::v3::Cluster::LeastRequestLbConfig lr_lb_config;
     lr_lb_config.mutable_choice_count()->set_value(choice_count);
-    lb_ =
-        std::make_unique<LeastRequestLoadBalancer>(priority_set_, &local_priority_set_, stats_,
-                                                   runtime_, random_, common_config_, lr_lb_config);
+    lb_ = std::make_unique<LeastRequestLoadBalancer>(priority_set_, &local_priority_set_, stats_,
+                                                     runtime_, random_, common_config_,
+                                                     lr_lb_config, simTime());
   }
 
   std::unique_ptr<LeastRequestLoadBalancer> lb_;
@@ -536,13 +540,13 @@ public:
         envoy::config::cluster::v3::Cluster::LbSubsetConfig::ANY_ENDPOINT);
     auto* selector = subset_config.mutable_subset_selectors()->Add();
     selector->set_single_host_per_subset(single_host_per_subset);
-    *selector->mutable_keys()->Add() = metadata_key;
+    *selector->mutable_keys()->Add() = std::string(metadata_key);
 
     subset_info_ = std::make_unique<LoadBalancerSubsetInfoImpl>(subset_config);
-    lb_ = std::make_unique<SubsetLoadBalancer>(LoadBalancerType::Random, priority_set_,
-                                               &local_priority_set_, stats_, stats_store_, runtime_,
-                                               random_, *subset_info_, absl::nullopt, absl::nullopt,
-                                               absl::nullopt, common_config_);
+    lb_ = std::make_unique<SubsetLoadBalancer>(
+        LoadBalancerType::Random, priority_set_, &local_priority_set_, stats_, stats_store_,
+        runtime_, random_, *subset_info_, absl::nullopt, absl::nullopt, absl::nullopt,
+        absl::nullopt, common_config_, simTime());
 
     const HostVector& hosts = priority_set_.getOrCreateHostSet(0).hosts();
     ASSERT(hosts.size() == num_hosts);

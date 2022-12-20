@@ -4,6 +4,8 @@
 
 namespace Envoy {
 
+using testing::HasSubstr;
+
 INSTANTIATE_TEST_SUITE_P(IpVersions, HttpTimeoutIntegrationTest,
                          testing::ValuesIn(TestEnvironment::getIpVersionsForTest()),
                          TestUtility::ipTestParamsToString);
@@ -11,6 +13,7 @@ INSTANTIATE_TEST_SUITE_P(IpVersions, HttpTimeoutIntegrationTest,
 // Sends a request with a global timeout specified, sleeps for longer than the
 // timeout, and ensures that a timeout is received.
 TEST_P(HttpTimeoutIntegrationTest, GlobalTimeout) {
+  config_helper_.addConfigModifier(configureProxyStatus());
   initialize();
 
   codec_client_ = makeHttpConnection(makeClientConnection(lookupPort("http")));
@@ -35,7 +38,7 @@ TEST_P(HttpTimeoutIntegrationTest, GlobalTimeout) {
   timeSystem().advanceTimeWait(std::chrono::milliseconds(501));
 
   // Ensure we got a timeout downstream and canceled the upstream request.
-  response->waitForHeaders();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(upstream_request_->waitForReset(std::chrono::seconds(15)));
 
   codec_client_->close();
@@ -45,6 +48,8 @@ TEST_P(HttpTimeoutIntegrationTest, GlobalTimeout) {
 
   EXPECT_TRUE(response->complete());
   EXPECT_EQ("504", response->headers().getStatusValue());
+  EXPECT_EQ(response->headers().getProxyStatusValue(),
+            "envoy; error=connection_timeout; details=\"response_timeout; UT\"");
 }
 
 // Testing that `x-envoy-expected-timeout-ms` header, set by egress envoy, is respected by ingress
@@ -76,7 +81,7 @@ TEST_P(HttpTimeoutIntegrationTest, UseTimeoutSetByEgressEnvoy) {
   timeSystem().advanceTimeWait(std::chrono::milliseconds(301));
 
   // Ensure we got a timeout downstream and canceled the upstream request.
-  response->waitForHeaders();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(upstream_request_->waitForReset(std::chrono::seconds(15)));
 
   codec_client_->close();
@@ -117,7 +122,7 @@ TEST_P(HttpTimeoutIntegrationTest, DeriveTimeoutInIngressEnvoy) {
   timeSystem().advanceTimeWait(std::chrono::milliseconds(501));
 
   // Ensure we got a timeout downstream and canceled the upstream request.
-  response->waitForHeaders();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(upstream_request_->waitForReset(std::chrono::seconds(15)));
 
   codec_client_->close();
@@ -159,7 +164,7 @@ TEST_P(HttpTimeoutIntegrationTest, IgnoreTimeoutSetByEgressEnvoy) {
   timeSystem().advanceTimeWait(std::chrono::milliseconds(501));
 
   // Ensure we got a timeout downstream and canceled the upstream request.
-  response->waitForHeaders();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(upstream_request_->waitForReset(std::chrono::seconds(15)));
 
   codec_client_->close();
@@ -209,7 +214,7 @@ TEST_P(HttpTimeoutIntegrationTest, GlobalTimeoutAfterHeadersBeforeBodyResetsUpst
 
   ASSERT_TRUE(upstream_request_->waitForReset(std::chrono::seconds(15)));
 
-  response->waitForReset();
+  ASSERT_TRUE(response->waitForReset());
 
   codec_client_->close();
 
@@ -256,7 +261,7 @@ TEST_P(HttpTimeoutIntegrationTest, PerTryTimeout) {
 
   // Trigger global timeout.
   timeSystem().advanceTimeWait(std::chrono::milliseconds(100));
-  response->waitForHeaders();
+  ASSERT_TRUE(response->waitForEndStream());
 
   codec_client_->close();
 
@@ -308,7 +313,7 @@ TEST_P(HttpTimeoutIntegrationTest, PerTryTimeoutWithoutGlobalTimeout) {
   Http::TestResponseHeaderMapImpl response_headers{{":status", "200"}};
   upstream_request_->encodeHeaders(response_headers, true);
 
-  response->waitForHeaders();
+  ASSERT_TRUE(response->waitForEndStream());
   codec_client_->close();
 
   EXPECT_TRUE(upstream_request_->complete());
@@ -363,7 +368,7 @@ TEST_P(HttpTimeoutIntegrationTest, HedgedPerTryTimeout) {
   Http::TestResponseHeaderMapImpl response_headers{{":status", "200"}};
   upstream_request_->encodeHeaders(response_headers, true);
 
-  response->waitForHeaders();
+  ASSERT_TRUE(response->waitForEndStream());
 
   // The second request should be reset since we used the response from the first request.
   ASSERT_TRUE(upstream_request2->waitForReset(std::chrono::seconds(15)));
@@ -483,7 +488,7 @@ void HttpTimeoutIntegrationTest::testRouterRequestAndResponseWithHedgedPerTryTim
     }
   }
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
 
   codec_client_->close();
 
@@ -497,6 +502,48 @@ void HttpTimeoutIntegrationTest::testRouterRequestAndResponseWithHedgedPerTryTim
 
   EXPECT_TRUE(response->complete());
   EXPECT_EQ("200", response->headers().getStatusValue());
+}
+
+// Starts a request with a header timeout specified, sleeps for longer than the
+// timeout, and ensures that a timeout is received.
+TEST_P(HttpTimeoutIntegrationTest, RequestHeaderTimeout) {
+  if (downstreamProtocol() != Http::CodecType::HTTP1) {
+    // This test requires that the downstream be using HTTP1.
+    return;
+  }
+
+  config_helper_.addConfigModifier(
+      [&](envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager&
+              hcm) {
+        auto* request_headers_timeout = hcm.mutable_request_headers_timeout();
+        request_headers_timeout->set_seconds(1);
+        request_headers_timeout->set_nanos(0);
+      });
+  initialize();
+
+  const std::string input_request = ("GET / HTTP/1.1\r\n"
+                                     // Omit trailing \r\n that would indicate the end of headers.
+                                     "Host: localhost\r\n");
+  std::string response;
+
+  auto connection_driver = createConnectionDriver(
+      lookupPort("http"), input_request,
+      [&response](Network::ClientConnection&, const Buffer::Instance& data) -> void {
+        response.append(data.toString());
+      });
+
+  while (!connection_driver->allBytesSent()) {
+    ASSERT_TRUE(connection_driver->run(Event::Dispatcher::RunType::NonBlock));
+  }
+  test_server_->waitForGaugeGe("http.config_test.downstream_rq_active", 1);
+  ASSERT_FALSE(connection_driver->closed());
+
+  timeSystem().advanceTimeWait(std::chrono::milliseconds(1001));
+  ASSERT_TRUE(connection_driver->run());
+
+  // The upstream should send a 40x response and send a local reply.
+  EXPECT_TRUE(connection_driver->closed());
+  EXPECT_THAT(response, AllOf(HasSubstr("408"), HasSubstr("header")));
 }
 
 } // namespace Envoy

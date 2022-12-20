@@ -6,9 +6,10 @@
 #include "envoy/config/core/v3/base.pb.h"
 #include "envoy/extensions/filters/http/router/v3/router.pb.h"
 
-#include "common/network/utility.h"
-#include "common/router/router.h"
-#include "common/upstream/upstream_impl.h"
+#include "source/common/network/utility.h"
+#include "source/common/router/router.h"
+#include "source/common/router/upstream_codec_filter.h"
+#include "source/common/upstream/upstream_impl.h"
 
 #include "test/common/http/common.h"
 #include "test/mocks/access_log/mocks.h"
@@ -40,10 +41,12 @@ absl::optional<envoy::config::accesslog::v3::AccessLog> testUpstreamLog() {
   const std::string yaml = R"EOF(
 name: accesslog
 typed_config:
-  "@type": type.googleapis.com/envoy.config.accesslog.v2.FileAccessLog
-  format: "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL% %RESPONSE_CODE%
-    %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %REQ(:AUTHORITY)% %UPSTREAM_HOST%
-    %UPSTREAM_LOCAL_ADDRESS% %RESP(X-UPSTREAM-HEADER)% %TRAILER(X-TRAILER)%\n"
+  "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+  log_format:
+    text_format_source:
+      inline_string: "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL% %RESPONSE_CODE%
+      %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %UPSTREAM_WIRE_BYTES_RECEIVED% %UPSTREAM_WIRE_BYTES_SENT% %REQ(:AUTHORITY)% %UPSTREAM_HOST%
+      %UPSTREAM_LOCAL_ADDRESS% %RESP(X-UPSTREAM-HEADER)% %TRAILER(X-TRAILER)%\n"
   path: "/dev/null"
   )EOF";
 
@@ -62,8 +65,9 @@ public:
   // Filter
   RetryStatePtr createRetryState(const RetryPolicy&, Http::RequestHeaderMap&,
                                  const Upstream::ClusterInfo&, const VirtualCluster*,
-                                 Runtime::Loader&, Random::RandomGenerator&, Event::Dispatcher&,
-                                 TimeSource&, Upstream::ResourcePriority) override {
+                                 RouteStatsContextOptRef, Runtime::Loader&,
+                                 Random::RandomGenerator&, Event::Dispatcher&, TimeSource&,
+                                 Upstream::ResourcePriority) override {
     EXPECT_EQ(nullptr, retry_state_);
     retry_state_ = new NiceMock<MockRetryState>();
     return RetryStatePtr{retry_state_};
@@ -81,6 +85,13 @@ class RouterUpstreamLogTest : public testing::Test {
 public:
   void init(absl::optional<envoy::config::accesslog::v3::AccessLog> upstream_log) {
     envoy::extensions::filters::http::router::v3::Router router_proto;
+    static const std::string cluster_name = "cluster_0";
+
+    cluster_info_ = std::make_shared<NiceMock<Upstream::MockClusterInfo>>();
+    ON_CALL(*cluster_info_, name()).WillByDefault(ReturnRef(cluster_name));
+    ON_CALL(*cluster_info_, observabilityName()).WillByDefault(ReturnRef(cluster_name));
+    ON_CALL(callbacks_.stream_info_, upstreamClusterInfo()).WillByDefault(Return(cluster_info_));
+    EXPECT_CALL(callbacks_.dispatcher_, deferredDelete_).Times(testing::AnyNumber());
 
     if (upstream_log) {
       ON_CALL(*context_.access_log_manager_.file_, write(_))
@@ -92,21 +103,24 @@ public:
       current_upstream_log->CopyFrom(upstream_log.value());
     }
 
-    config_ = std::make_shared<FilterConfig>("prefix.", context_,
+    Stats::StatNameManagedStorage prefix("prefix", context_.scope().symbolTable());
+    config_ = std::make_shared<FilterConfig>(prefix.statName(), context_,
                                              ShadowWriterPtr(new MockShadowWriter()), router_proto);
-    router_ = std::make_shared<TestFilter>(*config_);
+    router_ = std::make_shared<TestFilter>(*config_, config_->default_stats_);
     router_->setDecoderFilterCallbacks(callbacks_);
-    EXPECT_CALL(callbacks_.dispatcher_, setTrackedObject(_)).Times(testing::AnyNumber());
+    EXPECT_CALL(callbacks_.dispatcher_, pushTrackedObject(_)).Times(testing::AnyNumber());
+    EXPECT_CALL(callbacks_.dispatcher_, popTrackedObject(_)).Times(testing::AnyNumber());
 
     upstream_locality_.set_zone("to_az");
-
-    ON_CALL(*context_.cluster_manager_.conn_pool_.host_, address())
+    context_.cluster_manager_.initializeThreadLocalClusters({"fake_cluster"});
+    ON_CALL(*context_.cluster_manager_.thread_local_cluster_.conn_pool_.host_, address())
         .WillByDefault(Return(host_address_));
-    ON_CALL(*context_.cluster_manager_.conn_pool_.host_, locality())
+    ON_CALL(*context_.cluster_manager_.thread_local_cluster_.conn_pool_.host_, locality())
         .WillByDefault(ReturnRef(upstream_locality_));
-    router_->downstream_connection_.local_address_ = host_address_;
-    router_->downstream_connection_.remote_address_ =
-        Network::Utility::parseInternetAddressAndPort("1.2.3.4:80");
+    router_->downstream_connection_.stream_info_.downstream_connection_info_provider_
+        ->setLocalAddress(host_address_);
+    router_->downstream_connection_.stream_info_.downstream_connection_info_provider_
+        ->setRemoteAddress(Network::Utility::parseInternetAddressAndPort("1.2.3.4:80"));
   }
 
   void expectResponseTimerCreate() {
@@ -129,31 +143,35 @@ public:
     NiceMock<Http::MockRequestEncoder> encoder;
     Http::ResponseDecoder* response_decoder = nullptr;
 
-    EXPECT_CALL(context_.cluster_manager_.conn_pool_, newStream(_, _))
-        .WillOnce(Invoke(
-            [&](Http::ResponseDecoder& decoder,
-                Http::ConnectionPool::Callbacks& callbacks) -> Http::ConnectionPool::Cancellable* {
-              response_decoder = &decoder;
-              EXPECT_CALL(encoder.stream_, connectionLocalAddress())
-                  .WillRepeatedly(ReturnRef(upstream_local_address1_));
-              callbacks.onPoolReady(encoder, context_.cluster_manager_.conn_pool_.host_,
-                                    stream_info_);
-              return nullptr;
-            }));
+    EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_.conn_pool_, newStream(_, _, _))
+        .WillOnce(Invoke([&](Http::ResponseDecoder& decoder,
+                             Http::ConnectionPool::Callbacks& callbacks,
+                             const Http::ConnectionPool::Instance::StreamOptions&)
+                             -> Http::ConnectionPool::Cancellable* {
+          response_decoder = &decoder;
+          EXPECT_CALL(encoder.stream_, connectionInfoProvider())
+              .WillRepeatedly(ReturnRef(connection_info1_));
+          callbacks.onPoolReady(encoder,
+                                context_.cluster_manager_.thread_local_cluster_.conn_pool_.host_,
+                                stream_info_, Http::Protocol::Http10);
+          return nullptr;
+        }));
     expectResponseTimerCreate();
 
     Http::TestRequestHeaderMapImpl headers(request_headers_init);
     HttpTestUtility::addDefaultHeaders(headers);
     router_->decodeHeaders(headers, true);
 
-    EXPECT_CALL(*router_->retry_state_, shouldRetryHeaders(_, _)).WillOnce(Return(RetryStatus::No));
+    EXPECT_CALL(*router_->retry_state_, shouldRetryHeaders(_, _, _))
+        .WillOnce(Return(RetryStatus::No));
 
     Http::ResponseHeaderMapPtr response_headers(
         new Http::TestResponseHeaderMapImpl(response_headers_init));
     response_headers->setStatus(response_code);
 
-    EXPECT_CALL(context_.cluster_manager_.conn_pool_.host_->outlier_detector_,
+    EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_.conn_pool_.host_->outlier_detector_,
                 putHttpResponseCode(response_code));
+    // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
     response_decoder->decodeHeaders(std::move(response_headers), false);
 
     Http::ResponseTrailerMapPtr response_trailers(
@@ -167,17 +185,19 @@ public:
     NiceMock<Http::MockRequestEncoder> encoder1;
     Http::ResponseDecoder* response_decoder = nullptr;
 
-    EXPECT_CALL(context_.cluster_manager_.conn_pool_, newStream(_, _))
-        .WillOnce(Invoke(
-            [&](Http::ResponseDecoder& decoder,
-                Http::ConnectionPool::Callbacks& callbacks) -> Http::ConnectionPool::Cancellable* {
-              response_decoder = &decoder;
-              EXPECT_CALL(encoder1.stream_, connectionLocalAddress())
-                  .WillRepeatedly(ReturnRef(upstream_local_address1_));
-              callbacks.onPoolReady(encoder1, context_.cluster_manager_.conn_pool_.host_,
-                                    stream_info_);
-              return nullptr;
-            }));
+    EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_.conn_pool_, newStream(_, _, _))
+        .WillOnce(Invoke([&](Http::ResponseDecoder& decoder,
+                             Http::ConnectionPool::Callbacks& callbacks,
+                             const Http::ConnectionPool::Instance::StreamOptions&)
+                             -> Http::ConnectionPool::Cancellable* {
+          response_decoder = &decoder;
+          EXPECT_CALL(encoder1.stream_, connectionInfoProvider())
+              .WillRepeatedly(ReturnRef(connection_info1_));
+          callbacks.onPoolReady(encoder1,
+                                context_.cluster_manager_.thread_local_cluster_.conn_pool_.host_,
+                                stream_info_, Http::Protocol::Http10);
+          return nullptr;
+        }));
     expectPerTryTimerCreate();
     expectResponseTimerCreate();
 
@@ -188,35 +208,41 @@ public:
     router_->decodeHeaders(headers, true);
 
     router_->retry_state_->expectResetRetry();
-    EXPECT_CALL(context_.cluster_manager_.conn_pool_.host_->outlier_detector_,
+    EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_.conn_pool_.host_->outlier_detector_,
                 putResult(Upstream::Outlier::Result::LocalOriginTimeout, _));
     per_try_timeout_->invokeCallback();
 
     // We expect this reset to kick off a new request.
     NiceMock<Http::MockRequestEncoder> encoder2;
-    EXPECT_CALL(context_.cluster_manager_.conn_pool_, newStream(_, _))
-        .WillOnce(Invoke(
-            [&](Http::ResponseDecoder& decoder,
-                Http::ConnectionPool::Callbacks& callbacks) -> Http::ConnectionPool::Cancellable* {
-              response_decoder = &decoder;
-              EXPECT_CALL(context_.cluster_manager_.conn_pool_.host_->outlier_detector_,
-                          putResult(Upstream::Outlier::Result::LocalOriginConnectSuccess, _));
-              EXPECT_CALL(encoder2.stream_, connectionLocalAddress())
-                  .WillRepeatedly(ReturnRef(upstream_local_address2_));
-              callbacks.onPoolReady(encoder2, context_.cluster_manager_.conn_pool_.host_,
-                                    stream_info_);
-              return nullptr;
-            }));
+    EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_.conn_pool_, newStream(_, _, _))
+        .WillOnce(Invoke([&](Http::ResponseDecoder& decoder,
+                             Http::ConnectionPool::Callbacks& callbacks,
+                             const Http::ConnectionPool::Instance::StreamOptions&)
+                             -> Http::ConnectionPool::Cancellable* {
+          response_decoder = &decoder;
+          EXPECT_CALL(
+              context_.cluster_manager_.thread_local_cluster_.conn_pool_.host_->outlier_detector_,
+              putResult(Upstream::Outlier::Result::LocalOriginConnectSuccess, _));
+          EXPECT_CALL(encoder2.stream_, connectionInfoProvider())
+              .WillRepeatedly(ReturnRef(connection_info2_));
+          callbacks.onPoolReady(encoder2,
+                                context_.cluster_manager_.thread_local_cluster_.conn_pool_.host_,
+                                stream_info_, Http::Protocol::Http10);
+          return nullptr;
+        }));
     expectPerTryTimerCreate();
     router_->retry_state_->callback_();
 
     // Normal response.
-    EXPECT_CALL(*router_->retry_state_, shouldRetryHeaders(_, _)).WillOnce(Return(RetryStatus::No));
+    EXPECT_CALL(*router_->retry_state_, shouldRetryHeaders(_, _, _))
+        .WillOnce(Return(RetryStatus::No));
     Http::ResponseHeaderMapPtr response_headers(
         new Http::TestResponseHeaderMapImpl{{":status", "200"}});
-    EXPECT_CALL(context_.cluster_manager_.conn_pool_.host_->outlier_detector_,
+    EXPECT_CALL(context_.cluster_manager_.thread_local_cluster_.conn_pool_.host_->outlier_detector_,
                 putHttpResponseCode(200));
-    response_decoder->decodeHeaders(std::move(response_headers), true);
+    if (response_decoder != nullptr) {
+      response_decoder->decodeHeaders(std::move(response_headers), true);
+    }
   }
 
   std::vector<std::string> output_;
@@ -230,12 +256,17 @@ public:
       Network::Utility::resolveUrl("tcp://10.0.0.5:10211")};
   Network::Address::InstanceConstSharedPtr upstream_local_address2_{
       Network::Utility::resolveUrl("tcp://10.0.0.5:10212")};
+  Network::ConnectionInfoSetterImpl connection_info1_{upstream_local_address1_,
+                                                      upstream_local_address1_};
+  Network::ConnectionInfoSetterImpl connection_info2_{upstream_local_address2_,
+                                                      upstream_local_address2_};
   Event::MockTimer* response_timeout_{};
   Event::MockTimer* per_try_timeout_{};
 
   NiceMock<Http::MockStreamDecoderFilterCallbacks> callbacks_;
   std::shared_ptr<FilterConfig> config_;
   std::shared_ptr<TestFilter> router_;
+  std::shared_ptr<NiceMock<Upstream::MockClusterInfo>> cluster_info_;
   NiceMock<StreamInfo::MockStreamInfo> stream_info_;
 };
 
@@ -251,7 +282,8 @@ TEST_F(RouterUpstreamLogTest, LogSingleTry) {
   run();
 
   EXPECT_EQ(output_.size(), 1U);
-  EXPECT_EQ(output_.front(), "GET / HTTP/1.0 200 - 0 0 host 10.0.0.5:9211 10.0.0.5:10211 - -\n");
+  EXPECT_EQ(output_.front(),
+            "GET / HTTP/1.0 200 - 0 0 0 0 host 10.0.0.5:9211 10.0.0.5:10211 - -\n");
 }
 
 TEST_F(RouterUpstreamLogTest, LogRetries) {
@@ -259,8 +291,8 @@ TEST_F(RouterUpstreamLogTest, LogRetries) {
   runWithRetry();
 
   EXPECT_EQ(output_.size(), 2U);
-  EXPECT_EQ(output_.front(), "GET / HTTP/1.0 0 UT 0 0 host 10.0.0.5:9211 10.0.0.5:10211 - -\n");
-  EXPECT_EQ(output_.back(), "GET / HTTP/1.0 200 - 0 0 host 10.0.0.5:9211 10.0.0.5:10212 - -\n");
+  EXPECT_EQ(output_.front(), "GET / HTTP/1.0 0 UT 0 0 0 0 host 10.0.0.5:9211 10.0.0.5:10211 - -\n");
+  EXPECT_EQ(output_.back(), "GET / HTTP/1.0 200 - 0 0 0 0 host 10.0.0.5:9211 10.0.0.5:10212 - -\n");
 }
 
 TEST_F(RouterUpstreamLogTest, LogFailure) {
@@ -268,7 +300,8 @@ TEST_F(RouterUpstreamLogTest, LogFailure) {
   run(503, {}, {}, {});
 
   EXPECT_EQ(output_.size(), 1U);
-  EXPECT_EQ(output_.front(), "GET / HTTP/1.0 503 - 0 0 host 10.0.0.5:9211 10.0.0.5:10211 - -\n");
+  EXPECT_EQ(output_.front(),
+            "GET / HTTP/1.0 503 - 0 0 0 0 host 10.0.0.5:9211 10.0.0.5:10211 - -\n");
 }
 
 TEST_F(RouterUpstreamLogTest, LogHeaders) {
@@ -278,7 +311,7 @@ TEST_F(RouterUpstreamLogTest, LogHeaders) {
 
   EXPECT_EQ(output_.size(), 1U);
   EXPECT_EQ(output_.front(),
-            "GET /foo HTTP/1.0 200 - 0 0 host 10.0.0.5:9211 10.0.0.5:10211 abcdef value\n");
+            "GET /foo HTTP/1.0 200 - 0 0 0 0 host 10.0.0.5:9211 10.0.0.5:10211 abcdef value\n");
 }
 
 // Test timestamps and durations are emitted.
@@ -286,9 +319,11 @@ TEST_F(RouterUpstreamLogTest, LogTimestampsAndDurations) {
   const std::string yaml = R"EOF(
 name: accesslog
 typed_config:
-  "@type": type.googleapis.com/envoy.config.accesslog.v2.FileAccessLog
-  format: "[%START_TIME%] %REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%
-    %DURATION% %RESPONSE_DURATION% %REQUEST_DURATION%"
+  "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+  log_format:
+    text_format_source:
+      inline_string: "[%START_TIME%] %REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%
+      %DURATION% %RESPONSE_DURATION% %REQUEST_DURATION%"
   path: "/dev/null"
   )EOF";
 
@@ -314,6 +349,66 @@ typed_config:
 
   // Check that timestamp is close enough.
   EXPECT_LE(std::abs(std::difftime(log_time, now)), 300);
+}
+
+// Test request headers/response headers/response trailers byte size.
+TEST_F(RouterUpstreamLogTest, HeaderByteSize) {
+  const std::string yaml = R"EOF(
+name: accesslog
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+  log_format:
+    text_format_source:
+      inline_string: "%REQUEST_HEADERS_BYTES% %RESPONSE_HEADERS_BYTES% %RESPONSE_TRAILERS_BYTES%"
+  path: "/dev/null"
+  )EOF";
+
+  envoy::config::accesslog::v3::AccessLog upstream_log;
+  TestUtility::loadFromYaml(yaml, upstream_log);
+
+  init(absl::optional<envoy::config::accesslog::v3::AccessLog>(upstream_log));
+  run(200, {{"request-header-name", "request-header-val"}},
+      {{"response-header-name", "response-header-val"}},
+      {{"response-trailer-name", "response-trailer-val"}});
+
+  EXPECT_EQ(output_.size(), 1U);
+  // Request headers:
+  // scheme: http
+  // :method: GET
+  // :authority: host
+  // :path: /
+  // x-envoy-expected-rq-timeout-ms: 10
+  // request-header-name: request-header-val
+
+  // Response headers:
+  // :status: 200
+  // response-header-name: response-header-val
+
+  // Response trailers:
+  // response-trailer-name: response-trailer-val
+  EXPECT_EQ(output_.front(), "110 49 41");
+}
+
+// Test UPSTREAM_CLUSTER log formatter.
+TEST_F(RouterUpstreamLogTest, UpstreamCluster) {
+  const std::string yaml = R"EOF(
+name: accesslog
+typed_config:
+  "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+  log_format:
+    text_format_source:
+      inline_string: "%UPSTREAM_CLUSTER%"
+  path: "/dev/null"
+  )EOF";
+
+  envoy::config::accesslog::v3::AccessLog upstream_log;
+  TestUtility::loadFromYaml(yaml, upstream_log);
+
+  init(absl::optional<envoy::config::accesslog::v3::AccessLog>(upstream_log));
+  run();
+
+  EXPECT_EQ(output_.size(), 1U);
+  EXPECT_EQ(output_.front(), "cluster_0");
 }
 
 } // namespace Router

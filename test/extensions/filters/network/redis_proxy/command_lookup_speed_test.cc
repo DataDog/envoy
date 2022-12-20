@@ -5,12 +5,11 @@
 #include <string>
 #include <vector>
 
-#include "common/common/fmt.h"
-#include "common/stats/isolated_store_impl.h"
-
-#include "extensions/filters/network/common/redis/client_impl.h"
-#include "extensions/filters/network/common/redis/supported_commands.h"
-#include "extensions/filters/network/redis_proxy/command_splitter_impl.h"
+#include "source/common/common/fmt.h"
+#include "source/common/stats/isolated_store_impl.h"
+#include "source/extensions/filters/network/common/redis/client_impl.h"
+#include "source/extensions/filters/network/common/redis/supported_commands.h"
+#include "source/extensions/filters/network/redis_proxy/command_splitter_impl.h"
 
 #include "test/extensions/filters/network/redis_proxy/mocks.h"
 #include "test/mocks/event/mocks.h"
@@ -31,9 +30,14 @@ public:
   ~NoOpSplitCallbacks() override = default;
 
   bool connectionAllowed() override { return true; }
+  void onQuit() override {}
   void onAuth(const std::string&) override {}
   void onAuth(const std::string&, const std::string&) override {}
   void onResponse(Common::Redis::RespValuePtr&&) override {}
+  Common::Redis::Client::Transaction& transaction() override { return transaction_; }
+
+private:
+  Common::Redis::Client::NoOpTransaction transaction_;
 };
 
 class NullRouterImpl : public Router {

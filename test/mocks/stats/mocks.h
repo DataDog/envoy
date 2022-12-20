@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <string>
 
@@ -14,37 +15,18 @@
 #include "envoy/thread_local/thread_local.h"
 #include "envoy/upstream/cluster_manager.h"
 
-#include "common/stats/histogram_impl.h"
-#include "common/stats/isolated_store_impl.h"
-#include "common/stats/store_impl.h"
-#include "common/stats/symbol_table_impl.h"
-#include "common/stats/timespan_impl.h"
+#include "source/common/stats/histogram_impl.h"
+#include "source/common/stats/isolated_store_impl.h"
+#include "source/common/stats/store_impl.h"
+#include "source/common/stats/symbol_table.h"
+#include "source/common/stats/timespan_impl.h"
 
 #include "test/common/stats/stat_test_utility.h"
-#include "test/test_common/global.h"
 
 #include "gmock/gmock.h"
 
 namespace Envoy {
 namespace Stats {
-
-class TestSymbolTableHelper {
-public:
-  SymbolTable& symbolTable() { return symbol_table_; }
-  const SymbolTable& constSymbolTable() const { return symbol_table_; }
-
-private:
-  SymbolTableImpl symbol_table_;
-};
-
-class TestSymbolTable {
-public:
-  SymbolTable& operator*() { return global_.get().symbolTable(); }
-  const SymbolTable& operator*() const { return global_.get().constSymbolTable(); }
-  SymbolTable* operator->() { return &global_.get().symbolTable(); }
-  const SymbolTable* operator->() const { return &global_.get().constSymbolTable(); }
-  Envoy::Test::Global<TestSymbolTableHelper> global_;
-};
 
 template <class BaseClass> class MockMetric : public BaseClass {
 public:
@@ -103,7 +85,7 @@ public:
     }
   }
 
-  TestSymbolTable symbol_table_; // Must outlive name_.
+  TestUtil::TestSymbolTable symbol_table_; // Must outlive name_.
   MetricName name_;
 
   void setTags(const TagVector& tags) {
@@ -166,14 +148,6 @@ public:
   bool used_;
   uint64_t value_;
   uint64_t latch_;
-
-  // RefcountInterface
-  void incRefCount() override { refcount_helper_.incRefCount(); }
-  bool decRefCount() override { return refcount_helper_.decRefCount(); }
-  uint32_t use_count() const override { return refcount_helper_.use_count(); }
-
-private:
-  RefcountHelper refcount_helper_;
 };
 
 class MockGauge : public MockStatWithRefcount<Gauge> {
@@ -196,14 +170,6 @@ public:
   bool used_;
   uint64_t value_;
   ImportMode import_mode_;
-
-  // RefcountInterface
-  void incRefCount() override { refcount_helper_.incRefCount(); }
-  bool decRefCount() override { return refcount_helper_.decRefCount(); }
-  uint32_t use_count() const override { return refcount_helper_.use_count(); }
-
-private:
-  RefcountHelper refcount_helper_;
 };
 
 class MockHistogram : public MockMetric<Histogram> {
@@ -233,8 +199,8 @@ public:
   ~MockParentHistogram() override;
 
   void merge() override {}
-  const std::string quantileSummary() const override { return ""; };
-  const std::string bucketSummary() const override { return ""; };
+  std::string quantileSummary() const override { return ""; };
+  std::string bucketSummary() const override { return ""; };
 
   MOCK_METHOD(bool, used, (), (const));
   MOCK_METHOD(Histogram::Unit, unit, (), (const));
@@ -298,17 +264,26 @@ public:
   MOCK_METHOD(void, onHistogramComplete, (const Histogram& histogram, uint64_t value));
 };
 
-class SymbolTableProvider {
+class MockSinkPredicates : public SinkPredicates {
 public:
-  TestSymbolTable global_symbol_table_;
+  MockSinkPredicates();
+  ~MockSinkPredicates() override;
+  MOCK_METHOD(bool, includeCounter, (const Counter&));
+  MOCK_METHOD(bool, includeGauge, (const Gauge&));
+  MOCK_METHOD(bool, includeTextReadout, (const TextReadout&));
 };
 
-class MockStore : public SymbolTableProvider, public TestUtil::TestStore {
+class MockStore : public TestUtil::TestStore {
 public:
   MockStore();
   ~MockStore() override;
 
-  ScopePtr createScope(const std::string& name) override { return ScopePtr{createScope_(name)}; }
+  ScopeSharedPtr createScope(const std::string& name) override {
+    return ScopeSharedPtr(createScope_(name));
+  }
+  ScopeSharedPtr scopeFromStatName(StatName name) override {
+    return createScope(symbolTable().toString(name));
+  }
 
   MOCK_METHOD(void, deliverHistogramToSinks, (const Histogram& histogram, uint64_t value));
   MOCK_METHOD(Counter&, counter, (const std::string&));
@@ -322,6 +297,10 @@ public:
   MOCK_METHOD(Histogram&, histogramFromString, (const std::string& name, Histogram::Unit unit));
   MOCK_METHOD(TextReadout&, textReadout, (const std::string&));
   MOCK_METHOD(std::vector<TextReadoutSharedPtr>, text_readouts, (), (const));
+  MOCK_METHOD(void, forEachCounter, (SizeFn, StatFn<Counter>), (const));
+  MOCK_METHOD(void, forEachGauge, (SizeFn, StatFn<Gauge>), (const));
+  MOCK_METHOD(void, forEachTextReadout, (SizeFn, StatFn<TextReadout>), (const));
+  MOCK_METHOD(void, forEachHistogram, (SizeFn, StatFn<ParentHistogram>), (const));
 
   MOCK_METHOD(CounterOptConstRef, findCounter, (StatName), (const));
   MOCK_METHOD(GaugeOptConstRef, findGauge, (StatName), (const));
@@ -348,8 +327,9 @@ public:
     return textReadout(symbol_table_->toString(name));
   }
 
-  TestSymbolTable symbol_table_;
+  TestUtil::TestSymbolTable symbol_table_;
   testing::NiceMock<MockCounter> counter_;
+  testing::NiceMock<MockGauge> gauge_;
   std::vector<std::unique_ptr<MockHistogram>> histograms_;
 };
 
@@ -357,7 +337,7 @@ public:
  * With IsolatedStoreImpl it's hard to test timing stats.
  * MockIsolatedStatsStore mocks only deliverHistogramToSinks for better testing.
  */
-class MockIsolatedStatsStore : public SymbolTableProvider, public TestUtil::TestStore {
+class MockIsolatedStatsStore : public TestUtil::TestStore {
 public:
   MockIsolatedStatsStore();
   ~MockIsolatedStatsStore() override;
@@ -369,7 +349,9 @@ class MockStatsMatcher : public StatsMatcher {
 public:
   MockStatsMatcher();
   ~MockStatsMatcher() override;
-  MOCK_METHOD(bool, rejects, (const std::string& name), (const));
+  MOCK_METHOD(bool, rejects, (StatName name), (const));
+  MOCK_METHOD(StatsMatcher::FastResult, fastRejects, (StatName name), (const));
+  MOCK_METHOD(bool, slowRejects, (FastResult, StatName name), (const));
   bool acceptsAll() const override { return accepts_all_; }
   bool rejectsAll() const override { return rejects_all_; }
 

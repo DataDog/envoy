@@ -7,9 +7,9 @@
 #include "envoy/common/exception.h"
 #include "envoy/thread_local/thread_local.h"
 
-#include "common/common/assert.h"
-#include "common/common/c_smart_ptr.h"
-#include "common/common/logger.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/c_smart_ptr.h"
+#include "source/common/common/logger.h"
 
 #include "lua.hpp"
 
@@ -60,6 +60,33 @@ namespace Lua {
  * Declare a Lua function in which userdata is in upvalue slot 1. See DECLARE_LUA_FUNCTION_EX()
  */
 #define DECLARE_LUA_CLOSURE(Class, Name) DECLARE_LUA_FUNCTION_EX(Class, Name, lua_upvalueindex(1))
+
+/**
+ * Declare a Lua function in which values are added to a table to approximate an enum.
+ */
+#define LUA_ENUM(state, name, val)                                                                 \
+  lua_pushlstring(state, #name, sizeof(#name) - 1);                                                \
+  lua_pushnumber(state, val);                                                                      \
+  lua_settable(state, -3);
+
+/**
+ * Get absl::string_view from Lua string. This checks if the argument at index is a string
+ * and build an absl::string_view from it.
+ * @param state the current Lua state.
+ * @param index the index of argument.
+ * @return absl::string_view of Lua string with proper string length.
+ **/
+inline absl::string_view getStringViewFromLuaString(lua_State* state, int index) {
+  size_t input_size = 0;
+  // When the argument at index in Lua state is not a string, for example, giving a table to
+  // logTrace (which uses this function under the hood), Lua script exits with an error like the
+  // following: "[string \"...\"]:3: bad argument #1 to 'logTrace' (string expected, got table)".
+  // However,`luaL_checklstring` accepts a number as its argument and implicitly converts it to a
+  // string, since Lua provides automatic conversion between string and number values at run time
+  // (https://www.lua.org/manual/5.1/manual.html#2.2.1).
+  const char* input = luaL_checklstring(state, index, &input_size);
+  return absl::string_view(input, input_size);
+}
 
 /**
  * Calculate the maximum space needed to be aligned.
@@ -352,6 +379,8 @@ private:
 };
 
 using CoroutinePtr = std::unique_ptr<Coroutine>;
+using Initializer = std::function<void(lua_State*)>;
+using InitializerList = std::vector<Initializer>;
 
 /**
  * This class wraps a Lua state that can be used safely across threads. The model is that every
@@ -377,9 +406,10 @@ public:
   /**
    * Register a global for later use.
    * @param global supplies the name of the global.
+   * @param initializers supplies a collection of initializers.
    * @return a slot/index for later use with getGlobalRef().
    */
-  uint64_t registerGlobal(const std::string& global);
+  uint64_t registerGlobal(const std::string& global, const InitializerList& initializers);
 
   /**
    * Register a type with the thread local state. After this call the type will be available on

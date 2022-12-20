@@ -2,9 +2,8 @@
 
 #include "envoy/registry/registry.h"
 
-#include "common/network/connection_impl.h"
-
-#include "extensions/filters/http/common/pass_through_filter.h"
+#include "source/common/network/connection_impl.h"
+#include "source/extensions/filters/http/common/pass_through_filter.h"
 
 #include "test/extensions/filters/http/common/empty_http_filter_config.h"
 #include "test/test_common/utility.h"
@@ -37,7 +36,8 @@ public:
     // As long as we're doing horrible things let's do *all* the horrible things.
     // Assert the connection we have is a ConnectionImpl and const cast it so we
     // can force watermark changes.
-    auto conn_impl = dynamic_cast<const Network::ConnectionImpl*>(decoder_callbacks_->connection());
+    auto conn_impl =
+        dynamic_cast<const Network::ConnectionImpl*>(decoder_callbacks_->connection().ptr());
     return const_cast<Network::ConnectionImpl*>(conn_impl);
   }
 

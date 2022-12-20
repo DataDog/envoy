@@ -1,10 +1,11 @@
-#include "extensions/filters/network/thrift_proxy/router/config.h"
+#include "source/extensions/filters/network/thrift_proxy/router/config.h"
 
-#include "envoy/config/filter/thrift/router/v2alpha1/router.pb.h"
-#include "envoy/config/filter/thrift/router/v2alpha1/router.pb.validate.h"
+#include "envoy/extensions/filters/network/thrift_proxy/router/v3/router.pb.h"
+#include "envoy/extensions/filters/network/thrift_proxy/router/v3/router.pb.validate.h"
 #include "envoy/registry/registry.h"
 
-#include "extensions/filters/network/thrift_proxy/router/router_impl.h"
+#include "source/extensions/filters/network/thrift_proxy/router/router_impl.h"
+#include "source/extensions/filters/network/thrift_proxy/router/shadow_writer_impl.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -13,13 +14,22 @@ namespace ThriftProxy {
 namespace Router {
 
 ThriftFilters::FilterFactoryCb RouterFilterConfig::createFilterFactoryFromProtoTyped(
-    const envoy::config::filter::thrift::router::v2alpha1::Router& proto_config,
+    const envoy::extensions::filters::network::thrift_proxy::router::v3::Router& proto_config,
     const std::string& stat_prefix, Server::Configuration::FactoryContext& context) {
   UNREFERENCED_PARAMETER(proto_config);
 
-  return [&context, stat_prefix](ThriftFilters::FilterChainFactoryCallbacks& callbacks) -> void {
-    callbacks.addDecoderFilter(
-        std::make_shared<Router>(context.clusterManager(), stat_prefix, context.scope()));
+  auto stats =
+      std::make_shared<const RouterStats>(stat_prefix, context.scope(), context.localInfo());
+  auto shadow_writer = std::make_shared<ShadowWriterImpl>(
+      context.clusterManager(), *stats, context.mainThreadDispatcher(), context.threadLocal());
+  bool close_downstream_on_error =
+      PROTOBUF_GET_WRAPPED_OR_DEFAULT(proto_config, close_downstream_on_upstream_error, true);
+
+  return [&context, stats, shadow_writer, close_downstream_on_error](
+             ThriftFilters::FilterChainFactoryCallbacks& callbacks) -> void {
+    callbacks.addDecoderFilter(std::make_shared<Router>(context.clusterManager(), *stats,
+                                                        context.runtime(), *shadow_writer,
+                                                        close_downstream_on_error));
   };
 }
 

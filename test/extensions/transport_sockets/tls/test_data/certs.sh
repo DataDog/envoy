@@ -3,7 +3,8 @@
 set -e
 
 readonly DEFAULT_VALIDITY_DAYS=${DEFAULT_VALIDITY_DAYS:-730}
-readonly HERE=$(cd "$(dirname "$0")" && pwd)
+HERE=$(cd "$(dirname "$0")" && pwd)
+readonly HERE
 
 cd "$HERE" || exit 1
 trap cleanup EXIT
@@ -19,14 +20,14 @@ cleanup() {
 generate_ca() {
     local extra_args=()
     if [[ -n "$2" ]]; then
-	extra_args=(-CA "${2}_cert.pem" -CAkey "${2}_key.pem" -CAcreateserial);
+        extra_args=(-CA "${2}_cert.pem" -CAkey "${2}_key.pem" -CAcreateserial);
     else
-	extra_args=(-signkey "${1}_key.pem");
+        extra_args=(-signkey "${1}_key.pem");
     fi
     openssl genrsa -out "${1}_key.pem" 2048
     openssl req -new -key "${1}_key.pem" -out "${1}_cert.csr" -config "${1}_cert.cfg" -batch -sha256
     openssl x509 -req -days "${DEFAULT_VALIDITY_DAYS}" -in "${1}_cert.csr" -out "${1}_cert.pem" \
-	    -extensions v3_ca -extfile "${1}_cert.cfg" "${extra_args[@]}"
+            -extensions v3_ca -extfile "${1}_cert.cfg" "${extra_args[@]}"
     generate_info_header "$1"
 }
 
@@ -35,8 +36,8 @@ generate_rsa_key() {
     local keysize extra_args=()
     keysize="${2:-2048}"
     if [[ -n "$3" ]]; then
-	echo -n "$3" > "${1}_password.txt"
-	extra_args=(-aes128 -passout "file:${1}_password.txt")
+        echo -n "$3" > "${1}_password.txt"
+        extra_args=(-aes128 -passout "file:${1}_password.txt")
     fi
     openssl genrsa -out "${1}_key.pem" "${extra_args[@]}" "$keysize"
 }
@@ -53,14 +54,14 @@ generate_info_header() {
     local prefix
     prefix="TEST_$(echo "$1" | tr '[:lower:]' '[:upper:]')"
     {
-	echo "// NOLINT(namespace-envoy)"
-	echo "constexpr char ${prefix}_CERT_256_HASH[] ="
-	echo "    \"$(openssl x509 -in "${1}_cert.pem" -outform DER | openssl dgst -sha256 | cut -d" " -f2)\";"
-	echo "constexpr char ${prefix}_CERT_1_HASH[] = \"$(openssl x509 -in "${1}_cert.pem" -outform DER | openssl dgst -sha1 | cut -d" " -f2)\";"
-	echo "constexpr char ${prefix}_CERT_SPKI[] = \"$(openssl x509 -in "${1}_cert.pem" -noout -pubkey | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | openssl enc -base64)\";"
-	echo "constexpr char ${prefix}_CERT_SERIAL[] = \"$(openssl x509 -in "${1}_cert.pem" -noout -serial | cut -d"=" -f2 | awk '{print tolower($0)}')\";"
-	echo "constexpr char ${prefix}_CERT_NOT_BEFORE[] = \"$(openssl x509 -in "${1}_cert.pem" -noout -startdate | cut -d"=" -f2)\";"
-	echo "constexpr char ${prefix}_CERT_NOT_AFTER[] = \"$(openssl x509 -in "${1}_cert.pem" -noout -enddate | cut -d"=" -f2)\";"
+        echo "// NOLINT(namespace-envoy)"
+        echo "constexpr char ${prefix}_CERT_256_HASH[] ="
+        echo "    \"$(openssl x509 -in "${1}_cert.pem" -outform DER | openssl dgst -sha256 | cut -d" " -f2)\";"
+        echo "constexpr char ${prefix}_CERT_1_HASH[] = \"$(openssl x509 -in "${1}_cert.pem" -outform DER | openssl dgst -sha1 | cut -d" " -f2)\";"
+        echo "constexpr char ${prefix}_CERT_SPKI[] = \"$(openssl x509 -in "${1}_cert.pem" -noout -pubkey | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | openssl enc -base64)\";"
+        echo "constexpr char ${prefix}_CERT_SERIAL[] = \"$(openssl x509 -in "${1}_cert.pem" -noout -serial | cut -d"=" -f2 | awk '{print tolower($0)}')\";"
+        echo "constexpr char ${prefix}_CERT_NOT_BEFORE[] = \"$(openssl x509 -in "${1}_cert.pem" -noout -startdate | cut -d"=" -f2)\";"
+        echo "constexpr char ${prefix}_CERT_NOT_AFTER[] = \"$(openssl x509 -in "${1}_cert.pem" -noout -enddate | cut -d"=" -f2)\";"
     } > "${1}_cert_info.h"
 }
 
@@ -69,11 +70,11 @@ generate_x509_cert() {
     local days extra_args=()
     days="${3:-${DEFAULT_VALIDITY_DAYS}}"
     if [[ -f "${1}_password.txt" ]]; then
-	extra_args=(-passin "file:${1}_password.txt")
+        extra_args=(-passin "file:${1}_password.txt")
     fi
     openssl req -new -key "${1}_key.pem" -out "${1}_cert.csr" -config "${1}_cert.cfg" -batch -sha256 "${extra_args[@]}"
     openssl x509 -req -days "$days" -in "${1}_cert.csr" -sha256 -CA "${2}_cert.pem" -CAkey \
-	    "${2}_key.pem" -CAcreateserial -out "${1}_cert.pem" -extensions v3_ca -extfile "${1}_cert.cfg" "${extra_args[@]}"
+            "${2}_key.pem" -CAcreateserial -out "${1}_cert.pem" -extensions v3_ca -extfile "${1}_cert.cfg" "${extra_args[@]}"
     generate_info_header "$1"
 }
 
@@ -86,7 +87,7 @@ generate_x509_cert_nosubject() {
     days="${3:-${DEFAULT_VALIDITY_DAYS}}"
     openssl req -new -key "${1}_key.pem" -out "${1}_cert.csr" -config "${1}_cert.cfg" -subj / -batch -sha256
     openssl x509 -req -days "$days" -in "${1}_cert.csr" -sha256 -CA "${2}_cert.pem" -CAkey \
-	    "${2}_key.pem" -CAcreateserial -out "${1}_cert.pem" -extensions v3_ca -extfile "${1}_cert.cfg"
+            "${2}_key.pem" -CAcreateserial -out "${1}_cert.pem" -extensions v3_ca -extfile "${1}_cert.cfg"
     generate_info_header "$1"
 }
 
@@ -98,6 +99,36 @@ generate_selfsigned_x509_cert() {
     generate_info_header "$output_prefix"
 }
 
+# $1=<CA name>
+# Generates a chain of 3 intermediate certs in test_long_cert_chain
+# and a cert signed by this in test_random_cert.pem
+generate_cert_chain() {
+    local certname
+    local ca_name="${1}"
+    rm test_long_cert_chain.pem
+    touch test_long_cert_chain.pem
+    for x in {1..4}; do
+        certname="i$x"
+        if [[ $x -gt 1 ]]
+        then
+            ca_name="i$((x - 1))"
+        fi
+        echo "$x: $certname $ca_name"
+        generate_ca $certname $ca_name
+    done
+    for x in {1..3}; do
+        cat "i${x}_cert.pem" >> test_long_cert_chain.pem
+    done
+    mv i4_cert.pem test_random_cert.pem
+
+    # These intermediate files are unnecessary.
+    for x in {1..4}; do
+        rm -f "i${x}_key.pem"
+        rm -f "i${x}_cert.pem"
+        rm -f "i${x}_cert_info.h"
+    done
+}
+
 # Generate ca_cert.pem.
 generate_ca ca
 
@@ -106,6 +137,9 @@ generate_ca intermediate_ca ca
 
 # Concatenate intermediate_ca_cert.pem and ca_cert.pem to create valid certificate chain.
 cat intermediate_ca_cert.pem ca_cert.pem > intermediate_ca_cert_chain.pem
+
+# Generate a cert-chain with 4 intermediate certs
+generate_cert_chain ca
 
 # Generate fake_ca_cert.pem.
 generate_ca fake_ca
@@ -138,6 +172,9 @@ rm -f san_dns3_cert.cfg
 
 # Concatenate san_dns3_cert.pem and Test Intermediate CA (intermediate_ca_cert.pem) to create valid certificate chain.
 cat san_dns3_cert.pem intermediate_ca_cert.pem > san_dns3_chain.pem
+
+# Generate san_dns3_certkeychain.p12 with no password.
+openssl pkcs12 -export -out san_dns3_certkeychain.p12 -inkey san_dns3_key.pem -in san_dns3_cert.pem -certfile san_dns3_chain.pem -keypbe NONE -certpbe NONE -nomaciter -passout pass:
 
 # Generate san_dns4_cert.pm (signed by intermediate_ca_cert.pem).
 cp -f san_dns_cert.cfg san_dns4_cert.cfg
@@ -174,6 +211,9 @@ generate_rsa_key password_protected "" "p4ssw0rd"
 generate_x509_cert password_protected ca
 rm -f password_protected_cert.cfg
 
+# Generate password_protected_certkey.p12.
+openssl pkcs12 -export -out password_protected_certkey.p12 -inkey password_protected_key.pem -in password_protected_cert.pem -passout "file:password_protected_password.txt" -passin "pass:p4ssw0rd"
+
 # Generate selfsigned*_cert.pem.
 generate_rsa_key selfsigned
 generate_selfsigned_x509_cert selfsigned
@@ -184,6 +224,9 @@ cp -f selfsigned_cert.cfg selfsigned_rsa_1024_cert.cfg
 generate_rsa_key selfsigned_rsa_1024 1024
 generate_selfsigned_x509_cert selfsigned_rsa_1024
 rm -f selfsigned_rsa_1024_cert.cfg
+
+# Generate selfsigned_rsa_1024_certkey.p12 with no password.
+openssl pkcs12 -export -out selfsigned_rsa_1024_certkey.p12 -inkey selfsigned_rsa_1024_key.pem -in selfsigned_rsa_1024_cert.pem -keypbe NONE -certpbe NONE -nomaciter -passout pass:
 
 # Generate selfsigned_rsa_3072.pem
 cp -f selfsigned_cert.cfg selfsigned_rsa_3072_cert.cfg
@@ -209,6 +252,9 @@ cp -f selfsigned_cert.cfg selfsigned_ecdsa_p384_cert.cfg
 generate_ecdsa_key selfsigned_ecdsa_p384 secp384r1
 generate_selfsigned_x509_cert selfsigned_ecdsa_p384
 rm -f selfsigned_ecdsa_p384_cert.cfg
+
+# Generate selfsigned_ecdsa_p384_certkey.p12 with no password.
+openssl pkcs12 -export -out selfsigned_ecdsa_p384_certkey.p12 -inkey selfsigned_ecdsa_p384_key.pem -in selfsigned_ecdsa_p384_cert.pem -keypbe NONE -certpbe NONE -nomaciter -passout pass:
 
 # Generate long_validity_cert.pem as a self-signed, with expiry that exceeds 32bit time_t.
 cp -f selfsigned_cert.cfg long_validity_cert.cfg
@@ -260,3 +306,25 @@ generate_x509_cert_nosubject no_subject ca
 # Generate unit test certificate
 generate_rsa_key unittest
 generate_selfsigned_x509_cert unittest
+
+generate_rsa_key keyusage_cert_sign
+generate_x509_cert keyusage_cert_sign ca
+
+generate_rsa_key keyusage_crl_sign
+generate_x509_cert keyusage_crl_sign ca
+
+generate_rsa_key spiffe_san
+generate_x509_cert spiffe_san ca
+
+generate_rsa_key non_spiffe_san
+generate_x509_cert non_spiffe_san ca
+
+cp -f spiffe_san_cert.cfg expired_spiffe_san_cert.cfg
+generate_rsa_key expired_spiffe_san
+generate_x509_cert expired_spiffe_san ca -365
+rm -f expired_spiffe_san_cert.cfg
+
+cp -f spiffe_san_cert.cfg spiffe_san_signed_by_intermediate_cert.cfg
+generate_rsa_key spiffe_san_signed_by_intermediate
+generate_x509_cert spiffe_san_signed_by_intermediate intermediate_ca
+rm -f spiffe_san_signed_by_intermediate_cert.cfg

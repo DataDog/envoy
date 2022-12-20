@@ -5,10 +5,9 @@
 #include "envoy/http/filter.h"
 #include "envoy/stats/scope.h"
 
-#include "common/buffer/buffer_impl.h"
-
-#include "extensions/common/aws/signer.h"
-#include "extensions/filters/http/common/pass_through_filter.h"
+#include "source/common/buffer/buffer_impl.h"
+#include "source/extensions/common/aws/signer.h"
+#include "source/extensions/filters/http/common/pass_through_filter.h"
 
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
@@ -21,12 +20,13 @@ namespace AwsLambdaFilter {
 
 class Arn {
 public:
-  Arn(absl::string_view partition, absl::string_view service, absl::string_view region,
-      absl::string_view account_id, absl::string_view resource_type,
+  Arn(absl::string_view arn, absl::string_view partition, absl::string_view service,
+      absl::string_view region, absl::string_view account_id, absl::string_view resource_type,
       absl::string_view function_name)
-      : partition_(partition), service_(service), region_(region), account_id_(account_id),
-        resource_type_(resource_type), function_name_(function_name) {}
+      : arn_(arn), partition_(partition), service_(service), region_(region),
+        account_id_(account_id), resource_type_(resource_type), function_name_(function_name) {}
 
+  const std::string& arn() const { return arn_; }
   const std::string& partition() const { return partition_; }
   const std::string& service() const { return service_; }
   const std::string& region() const { return region_; }
@@ -35,6 +35,7 @@ public:
   const std::string& functionName() const { return function_name_; }
 
 private:
+  std::string arn_;
   std::string partition_;
   std::string service_;
   std::string region_;

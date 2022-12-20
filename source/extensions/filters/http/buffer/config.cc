@@ -1,4 +1,4 @@
-#include "extensions/filters/http/buffer/config.h"
+#include "source/extensions/filters/http/buffer/config.h"
 
 #include <chrono>
 #include <cstdint>
@@ -8,7 +8,7 @@
 #include "envoy/extensions/filters/http/buffer/v3/buffer.pb.validate.h"
 #include "envoy/registry/registry.h"
 
-#include "extensions/filters/http/buffer/buffer_filter.h"
+#include "source/extensions/filters/http/buffer/buffer_filter.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -17,7 +17,7 @@ namespace BufferFilter {
 
 Http::FilterFactoryCb BufferFilterFactory::createFilterFactoryFromProtoTyped(
     const envoy::extensions::filters::http::buffer::v3::Buffer& proto_config, const std::string&,
-    Server::Configuration::FactoryContext&) {
+    DualInfo, Server::Configuration::ServerFactoryContext&) {
   ASSERT(proto_config.has_max_request_bytes());
 
   BufferFilterConfigSharedPtr filter_config(new BufferFilterConfig(proto_config));
@@ -38,6 +38,8 @@ BufferFilterFactory::createRouteSpecificFilterConfigTyped(
  */
 REGISTER_FACTORY(BufferFilterFactory,
                  Server::Configuration::NamedHttpFilterConfigFactory){"envoy.buffer"};
+REGISTER_FACTORY(UpstreamBufferFilterFactory,
+                 Server::Configuration::UpstreamHttpFilterConfigFactory){"envoy.buffer"};
 
 } // namespace BufferFilter
 } // namespace HttpFilters

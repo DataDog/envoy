@@ -1,15 +1,15 @@
-#include "envoy/extensions/filters/udp/dns_filter/v3alpha/dns_filter.pb.h"
-#include "envoy/extensions/filters/udp/dns_filter/v3alpha/dns_filter.pb.validate.h"
+#include "envoy/extensions/filters/udp/dns_filter/v3/dns_filter.pb.h"
+#include "envoy/extensions/filters/udp/dns_filter/v3/dns_filter.pb.validate.h"
 
-#include "common/common/logger.h"
-
-#include "extensions/filters/udp/dns_filter/dns_filter_constants.h"
-#include "extensions/filters/udp/dns_filter/dns_filter_utils.h"
+#include "source/common/common/logger.h"
+#include "source/extensions/filters/udp/dns_filter/dns_filter_constants.h"
+#include "source/extensions/filters/udp/dns_filter/dns_filter_utils.h"
 
 #include "test/mocks/event/mocks.h"
 #include "test/mocks/server/instance.h"
 #include "test/mocks/server/listener_factory_context.h"
 #include "test/test_common/environment.h"
+#include "test/test_common/registry.h"
 #include "test/test_common/simulated_time_system.h"
 
 #include "dns_filter_test_utils.h"
@@ -18,6 +18,7 @@
 
 using testing::AnyNumber;
 using testing::AtLeast;
+using testing::DoAll;
 using testing::InSequence;
 using testing::Mock;
 using testing::Return;
@@ -30,9 +31,11 @@ namespace UdpFilters {
 namespace DnsFilter {
 namespace {
 
+using ResponseValidator = Utils::DnsResponseValidator;
+
 Api::IoCallUint64Result makeNoError(uint64_t rc) {
   auto no_error = Api::ioCallUint64ResultNoError();
-  no_error.rc_ = rc;
+  no_error.return_value_ = rc;
   return no_error;
 }
 
@@ -41,8 +44,8 @@ public:
   DnsFilterTest()
       : listener_address_(Network::Utility::parseInternetAddressAndPort("127.0.2.1:5353")),
         api_(Api::createApiForTest(random_)),
-        counters_(mock_query_buffer_underflow_, mock_record_name_overflow_,
-                  query_parsing_failure_) {
+        counters_(mock_query_buffer_underflow_, mock_record_name_overflow_, query_parsing_failure_,
+                  queries_with_additional_rrs_, queries_with_ans_or_authority_rrs_) {
     udp_response_.addresses_.local_ = listener_address_;
     udp_response_.addresses_.peer_ = listener_address_;
     udp_response_.buffer_ = std::make_unique<Buffer::OwnedImpl>();
@@ -63,12 +66,12 @@ public:
 
   void setupResponseParser() {
     histogram_.unit_ = Stats::Histogram::Unit::Milliseconds;
-    response_parser_ = std::make_unique<DnsMessageParser>(
+    query_parser_ = std::make_unique<DnsMessageParser>(
         true /* recursive queries */, api_->timeSource(), 0 /* retries */, random_, histogram_);
   }
 
   void setup(const std::string& yaml) {
-    envoy::extensions::filters::udp::dns_filter::v3alpha::DnsFilterConfig config;
+    envoy::extensions::filters::udp::dns_filter::v3::DnsFilterConfig config;
     TestUtility::loadFromYamlAndValidate(yaml, config);
     auto store = stats_store_.createScope("dns_scope");
     ON_CALL(listener_factory_, scope()).WillByDefault(ReturnRef(*store));
@@ -77,10 +80,21 @@ public:
     ON_CALL(listener_factory_, random()).WillByDefault(ReturnRef(random_));
 
     resolver_ = std::make_shared<Network::MockDnsResolver>();
-    ON_CALL(dispatcher_, createDnsResolver(_, _)).WillByDefault(Return(resolver_));
+    NiceMock<Network::MockDnsResolverFactory> dns_resolver_factory_;
+    Registry::InjectFactory<Network::DnsResolverFactory> registered_dns_factory_(
+        dns_resolver_factory_);
+    ON_CALL(dns_resolver_factory_, createDnsResolver(_, _, _))
+        .WillByDefault(DoAll(SaveArg<2>(&typed_dns_resolver_config_), Return(resolver_)));
 
     config_ = std::make_shared<DnsFilterEnvoyConfig>(listener_factory_, config);
     filter_ = std::make_unique<DnsFilter>(callbacks_, config_);
+    // Verify typed DNS resolver config is c-ares.
+    EXPECT_EQ(typed_dns_resolver_config_.name(), std::string(Network::CaresDnsResolver));
+    EXPECT_EQ(typed_dns_resolver_config_.typed_config().type_url(),
+              "type.googleapis.com/"
+              "envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig");
+    typed_dns_resolver_config_.typed_config().UnpackTo(&cares_);
+    dns_resolver_options_.MergeFrom(cares_.dns_resolver_options());
   }
 
   void sendQueryFromClient(const std::string& peer_address, const std::string& buffer) {
@@ -93,14 +107,19 @@ public:
   }
 
   const Network::Address::InstanceConstSharedPtr listener_address_;
+  envoy::config::core::v3::DnsResolverOptions dns_resolver_options_;
+  envoy::config::core::v3::TypedExtensionConfig typed_dns_resolver_config_;
+  envoy::extensions::network::dns_resolver::cares::v3::CaresDnsResolverConfig cares_;
   NiceMock<Random::MockRandomGenerator> random_;
   Api::ApiPtr api_;
   DnsFilterEnvoyConfigSharedPtr config_;
   NiceMock<Stats::MockCounter> mock_query_buffer_underflow_;
   NiceMock<Stats::MockCounter> mock_record_name_overflow_;
   NiceMock<Stats::MockCounter> query_parsing_failure_;
+  NiceMock<Stats::MockCounter> queries_with_additional_rrs_;
+  NiceMock<Stats::MockCounter> queries_with_ans_or_authority_rrs_;
   DnsParserCounters counters_;
-  DnsQueryContextPtr query_ctx_;
+  DnsQueryContextPtr response_ctx_;
   NiceMock<Event::MockDispatcher> dispatcher_;
   Network::MockUdpReadFilterCallbacks callbacks_;
   Network::UdpRecvData udp_response_;
@@ -110,19 +129,13 @@ public:
   Stats::IsolatedStoreImpl stats_store_;
   std::shared_ptr<Network::MockDnsResolver> resolver_;
   std::unique_ptr<DnsFilter> filter_;
-  std::unique_ptr<DnsMessageParser> response_parser_;
+  std::unique_ptr<DnsMessageParser> query_parser_;
 
   const std::string forward_query_off_config = R"EOF(
 stat_prefix: "my_prefix"
 server_config:
   inline_dns_table:
     external_retry_count: 3
-    known_suffixes:
-    - suffix: foo1.com
-    - suffix: foo2.com
-    - suffix: foo3.com
-    - suffix: foo16.com
-    - suffix: thisismydomainforafivehundredandtwelvebytetest.com
     virtual_domains:
     - name: "www.foo1.com"
       endpoint:
@@ -180,23 +193,24 @@ server_config:
 stat_prefix: "my_prefix"
 client_config:
   resolver_timeout: 1s
-  upstream_resolvers:
-  - socket_address:
-      address: "1.1.1.1"
-      port_value: 53
-  - socket_address:
-      address: "8.8.8.8"
-      port_value: 53
-  - socket_address:
-      address: "8.8.4.4"
-      port_value: 53
+  typed_dns_resolver_config:
+    name: envoy.network.dns_resolver.cares
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+      resolvers:
+      - socket_address:
+          address: "1.1.1.1"
+          port_value: 53
+      - socket_address:
+          address: "8.8.8.8"
+          port_value: 53
+      - socket_address:
+          address: "8.8.4.4"
+          port_value: 53
   max_pending_lookups: 1
 server_config:
   inline_dns_table:
     external_retry_count: 0
-    known_suffixes:
-    - suffix: foo1.com
-    - suffix: foo2.com
     virtual_domains:
       - name: "www.foo1.com"
         endpoint:
@@ -209,10 +223,74 @@ server_config:
 stat_prefix: "my_prefix"
 client_config:
   resolver_timeout: 1s
-  upstream_resolvers:
-  - socket_address:
-      address: "1.1.1.1"
-      port_value: 53
+  typed_dns_resolver_config:
+    name: envoy.network.dns_resolver.cares
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+      resolvers:
+      - socket_address:
+          address: "1.1.1.1"
+          port_value: 53
+  max_pending_lookups: 256
+server_config:
+  external_dns_table:
+    filename: {}
+)EOF";
+
+  const std::string dns_resolver_options_config_not_set = R"EOF(
+stat_prefix: "my_prefix"
+client_config:
+  resolver_timeout: 1s
+  typed_dns_resolver_config:
+    name: envoy.network.dns_resolver.cares
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+      resolvers:
+      - socket_address:
+          address: "1.1.1.1"
+          port_value: 53
+  max_pending_lookups: 256
+server_config:
+  external_dns_table:
+    filename: {}
+)EOF";
+
+  const std::string dns_resolver_options_config_set_false = R"EOF(
+stat_prefix: "my_prefix"
+client_config:
+  resolver_timeout: 1s
+  typed_dns_resolver_config:
+    name: envoy.network.dns_resolver.cares
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+      dns_resolver_options:
+        use_tcp_for_dns_lookups: false
+        no_default_search_domain: false
+      resolvers:
+      - socket_address:
+          address: "1.1.1.1"
+          port_value: 53
+  max_pending_lookups: 256
+server_config:
+  external_dns_table:
+    filename: {}
+)EOF";
+
+  const std::string dns_resolver_options_config_set_true = R"EOF(
+stat_prefix: "my_prefix"
+client_config:
+  resolver_timeout: 1s
+  typed_dns_resolver_config:
+    name: envoy.network.dns_resolver.cares
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+      dns_resolver_options:
+        use_tcp_for_dns_lookups: true
+        no_default_search_domain: true
+      resolvers:
+      - socket_address:
+          address: "1.1.1.1"
+          port_value: 53
   max_pending_lookups: 256
 server_config:
   external_dns_table:
@@ -222,7 +300,6 @@ server_config:
   const std::string external_dns_table_json = R"EOF(
 {
   "external_retry_count": 3,
-  "known_suffixes": [ { "suffix": "com" } ],
   "virtual_domains": [
     {
       "name": "www.external_foo1.com",
@@ -242,8 +319,6 @@ server_config:
 
   const std::string external_dns_table_yaml = R"EOF(
 external_retry_count: 3
-known_suffixes:
-  - suffix: "com"
 virtual_domains:
   - name: "www.external_foo1.com"
     endpoint:
@@ -269,8 +344,6 @@ virtual_domains:
 
   const std::string max_records_table_yaml = R"EOF(
 external_retry_count: 3
-known_suffixes:
-  - suffix: "ermac.com"
 virtual_domains:
   - name: "one.web.ermac.com"
     endpoint:
@@ -333,8 +406,6 @@ virtual_domains:
 
   const std::string external_dns_table_services_yaml = R"EOF(
 external_retry_count: 3
-known_suffixes:
-  - suffix: "subzero.com"
 virtual_domains:
   - name: "primary.voip.subzero.com"
     endpoint:
@@ -397,11 +468,11 @@ TEST_F(DnsFilterTest, InvalidQuery) {
 
   setup(forward_query_off_config);
   sendQueryFromClient("10.0.0.1:1000", "hello");
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 
   // Validate stats
   EXPECT_EQ(0, config_->stats().a_record_queries_.value());
@@ -423,15 +494,15 @@ TEST_F(DnsFilterTest, MaxQueryAndResponseSizeTest) {
   sendQueryFromClient("10.0.0.1:1000", query);
   EXPECT_LT(udp_response_.buffer_->length(), Utils::MAX_UDP_DNS_SIZE);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
   // There are 8 addresses, however, since the domain is part of the answer record, each
   // serialized answer is over 100 bytes in size, there is room for 3 before the next
   // serialized answer puts the buffer over the 512 byte limit. The query itself is also
   // around 100 bytes.
-  EXPECT_EQ(3, query_ctx_->answers_.size());
+  EXPECT_EQ(3, response_ctx_->answers_.size());
 
   // Validate stats
   EXPECT_EQ(1, config_->stats().aaaa_record_queries_.value());
@@ -454,11 +525,11 @@ TEST_F(DnsFilterTest, InvalidQueryNameTooLongTest) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 
   // Validate stats
   EXPECT_EQ(0, config_->stats().a_record_queries_.value());
@@ -466,8 +537,8 @@ TEST_F(DnsFilterTest, InvalidQueryNameTooLongTest) {
   EXPECT_TRUE(config_->stats().downstream_rx_bytes_.used());
   EXPECT_TRUE(config_->stats().downstream_tx_bytes_.used());
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 }
 
 TEST_F(DnsFilterTest, InvalidLabelNameTooLongTest) {
@@ -482,11 +553,11 @@ TEST_F(DnsFilterTest, InvalidLabelNameTooLongTest) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 
   // Validate stats
   EXPECT_EQ(0, config_->stats().a_record_queries_.value());
@@ -494,8 +565,8 @@ TEST_F(DnsFilterTest, InvalidLabelNameTooLongTest) {
   EXPECT_TRUE(config_->stats().downstream_rx_bytes_.used());
   EXPECT_TRUE(config_->stats().downstream_tx_bytes_.used());
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 }
 
 TEST_F(DnsFilterTest, SingleTypeAQuery) {
@@ -510,15 +581,15 @@ TEST_F(DnsFilterTest, SingleTypeAQuery) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(1, query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(1, response_ctx_->answers_.size());
 
   // Verify that we have an answer record for the queried domain
 
-  const DnsAnswerRecordPtr& answer = query_ctx_->answers_.find(domain)->second;
+  const DnsAnswerRecordPtr& answer = response_ctx_->answers_.find(domain)->second;
 
   // Verify the address returned
   const std::list<std::string> expected{"10.0.3.1"};
@@ -529,6 +600,33 @@ TEST_F(DnsFilterTest, SingleTypeAQuery) {
   EXPECT_EQ(1, config_->stats().downstream_rx_queries_.value());
   EXPECT_EQ(1, config_->stats().known_domain_queries_.value());
   EXPECT_EQ(1, config_->stats().local_a_record_answers_.value());
+  EXPECT_EQ(1, config_->stats().a_record_queries_.value());
+  EXPECT_TRUE(config_->stats().downstream_rx_bytes_.used());
+  EXPECT_TRUE(config_->stats().downstream_tx_bytes_.used());
+}
+
+TEST_F(DnsFilterTest, NoHostForSingleTypeAQuery) {
+  InSequence s;
+
+  setup(forward_query_off_config);
+
+  const std::string domain("www.api.foo3.com");
+  const std::string query =
+      Utils::buildQueryForDomain(domain, DNS_RECORD_TYPE_A, DNS_RECORD_CLASS_IN);
+  ASSERT_FALSE(query.empty());
+
+  sendQueryFromClient("10.0.0.1:1000", query);
+
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+
+  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
+
+  // Validate stats
+  EXPECT_EQ(1, config_->stats().downstream_rx_queries_.value());
+  EXPECT_EQ(1, config_->stats().known_domain_queries_.value());
+  EXPECT_EQ(0, config_->stats().local_a_record_answers_.value());
   EXPECT_EQ(1, config_->stats().a_record_queries_.value());
   EXPECT_TRUE(config_->stats().downstream_rx_bytes_.used());
   EXPECT_TRUE(config_->stats().downstream_tx_bytes_.used());
@@ -553,18 +651,18 @@ TEST_F(DnsFilterTest, RepeatedTypeAQuerySuccess) {
     ASSERT_FALSE(query.empty());
     sendQueryFromClient("10.0.0.1:1000", query);
 
-    query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
+    response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
 
-    const uint16_t response_id = query_ctx_->header_.id;
+    const uint16_t response_id = response_ctx_->header_.id;
     auto iter = std::find(query_id_list.begin(), query_id_list.end(), query_id);
     EXPECT_EQ(iter, query_id_list.end());
-    EXPECT_TRUE(query_ctx_->parse_status_);
+    EXPECT_TRUE(response_ctx_->parse_status_);
 
-    EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
-    EXPECT_EQ(1, query_ctx_->answers_.size());
+    EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+    EXPECT_EQ(1, response_ctx_->answers_.size());
 
     // Verify that we have an answer record for the queried domain
-    const DnsAnswerRecordPtr& answer = query_ctx_->answers_.find(domain)->second;
+    const DnsAnswerRecordPtr& answer = response_ctx_->answers_.find(domain)->second;
 
     // Verify that the Query ID matches the Response ID
     EXPECT_EQ(query_id, response_id);
@@ -591,11 +689,11 @@ TEST_F(DnsFilterTest, LocalTypeAQueryFail) {
   ASSERT_FALSE(query.empty());
 
   sendQueryFromClient("10.0.0.1:1000", query);
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 
   // Validate stats
   EXPECT_EQ(1, config_->stats().downstream_rx_queries_.value());
@@ -616,14 +714,14 @@ TEST_F(DnsFilterTest, LocalTypeAAAAQuerySuccess) {
   ASSERT_FALSE(query.empty());
 
   sendQueryFromClient("10.0.0.1:1000", query);
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(expected.size(), query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(expected.size(), response_ctx_->answers_.size());
 
   // Verify the address returned
-  for (const auto& answer : query_ctx_->answers_) {
+  for (const auto& answer : response_ctx_->answers_) {
     EXPECT_EQ(answer.first, domain);
     Utils::verifyAddress(expected, answer.second);
   }
@@ -639,7 +737,7 @@ TEST_F(DnsFilterTest, ExternalResolutionReturnSingleAddress) {
   InSequence s;
 
   auto timeout_timer = new NiceMock<Event::MockTimer>(&dispatcher_);
-  EXPECT_CALL(*timeout_timer, enableTimer(_, _)).Times(1);
+  EXPECT_CALL(*timeout_timer, enableTimer(_, _));
 
   const std::string expected_address("130.207.244.251");
   const std::string domain("www.foobaz.com");
@@ -664,14 +762,14 @@ TEST_F(DnsFilterTest, ExternalResolutionReturnSingleAddress) {
              TestUtility::makeDnsResponse({expected_address}));
 
   // parse the result
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(1, query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(1, response_ctx_->answers_.size());
 
   std::list<std::string> expected{expected_address};
-  for (const auto& answer : query_ctx_->answers_) {
+  for (const auto& answer : response_ctx_->answers_) {
     EXPECT_EQ(answer.first, domain);
     Utils::verifyAddress(expected, answer.second);
   }
@@ -691,7 +789,7 @@ TEST_F(DnsFilterTest, ExternalResolutionIpv6SingleAddress) {
   InSequence s;
 
   auto timeout_timer = new NiceMock<Event::MockTimer>(&dispatcher_);
-  EXPECT_CALL(*timeout_timer, enableTimer(_, _)).Times(1);
+  EXPECT_CALL(*timeout_timer, enableTimer(_, _));
 
   const std::string expected_address("2a04:4e42:d::323");
   const std::string domain("www.foobaz.com");
@@ -710,21 +808,21 @@ TEST_F(DnsFilterTest, ExternalResolutionIpv6SingleAddress) {
   // Send a query to for a name not in our configuration
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  EXPECT_CALL(*timeout_timer, disableTimer()).Times(1);
+  EXPECT_CALL(*timeout_timer, disableTimer());
 
   // Execute resolve callback
   resolve_cb(Network::DnsResolver::ResolutionStatus::Success,
              TestUtility::makeDnsResponse({expected_address}));
 
   // parse the result
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(1, query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(1, response_ctx_->answers_.size());
 
   std::list<std::string> expected{expected_address};
-  for (const auto& answer : query_ctx_->answers_) {
+  for (const auto& answer : response_ctx_->answers_) {
     EXPECT_EQ(answer.first, domain);
     Utils::verifyAddress(expected, answer.second);
   }
@@ -744,7 +842,7 @@ TEST_F(DnsFilterTest, ExternalResolutionReturnMultipleAddresses) {
   InSequence s;
 
   auto timeout_timer = new NiceMock<Event::MockTimer>(&dispatcher_);
-  EXPECT_CALL(*timeout_timer, enableTimer(_, _)).Times(1);
+  EXPECT_CALL(*timeout_timer, enableTimer(_, _));
 
   const std::list<std::string> expected_address{"130.207.244.251", "130.207.244.252",
                                                 "130.207.244.253", "130.207.244.254"};
@@ -763,22 +861,22 @@ TEST_F(DnsFilterTest, ExternalResolutionReturnMultipleAddresses) {
   // Send a query to for a name not in our configuration
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  EXPECT_CALL(*timeout_timer, disableTimer()).Times(1);
+  EXPECT_CALL(*timeout_timer, disableTimer());
 
   // Execute resolve callback
   resolve_cb(Network::DnsResolver::ResolutionStatus::Success,
              TestUtility::makeDnsResponse({expected_address}));
 
   // parse the result
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
 
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(expected_address.size(), query_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(expected_address.size(), response_ctx_->answers_.size());
 
   EXPECT_LT(udp_response_.buffer_->length(), Utils::MAX_UDP_DNS_SIZE);
 
-  for (const auto& answer : query_ctx_->answers_) {
+  for (const auto& answer : response_ctx_->answers_) {
     EXPECT_EQ(answer.first, domain);
     Utils::verifyAddress(expected_address, answer.second);
   }
@@ -798,7 +896,7 @@ TEST_F(DnsFilterTest, ExternalResolutionReturnNoAddresses) {
   InSequence s;
 
   auto timeout_timer = new NiceMock<Event::MockTimer>(&dispatcher_);
-  EXPECT_CALL(*timeout_timer, enableTimer(_, _)).Times(1);
+  EXPECT_CALL(*timeout_timer, enableTimer(_, _));
 
   const std::string domain("www.foobaz.com");
   setup(forward_query_on_config);
@@ -815,16 +913,16 @@ TEST_F(DnsFilterTest, ExternalResolutionReturnNoAddresses) {
   // Send a query to for a name not in our configuration
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  EXPECT_CALL(*timeout_timer, disableTimer()).Times(1);
+  EXPECT_CALL(*timeout_timer, disableTimer());
 
   // Execute resolve callback
   resolve_cb(Network::DnsResolver::ResolutionStatus::Success, TestUtility::makeDnsResponse({}));
 
   // parse the result
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 
   // Validate stats
   EXPECT_EQ(1, config_->stats().downstream_rx_queries_.value());
@@ -841,7 +939,7 @@ TEST_F(DnsFilterTest, ExternalResolutionTimeout) {
   InSequence s;
 
   auto timeout_timer = new NiceMock<Event::MockTimer>(&dispatcher_);
-  EXPECT_CALL(*timeout_timer, enableTimer(_, _)).Times(1);
+  EXPECT_CALL(*timeout_timer, enableTimer(_, _));
 
   const std::string domain("www.foobaz.com");
   setup(forward_query_on_config);
@@ -860,10 +958,10 @@ TEST_F(DnsFilterTest, ExternalResolutionTimeout) {
   timeout_timer->invokeCallback();
 
   // parse the result
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 
   // Validate stats
   EXPECT_EQ(1, config_->stats().downstream_rx_queries_.value());
@@ -880,7 +978,7 @@ TEST_F(DnsFilterTest, ExternalResolutionTimeout2) {
   InSequence s;
 
   auto timeout_timer = new NiceMock<Event::MockTimer>(&dispatcher_);
-  EXPECT_CALL(*timeout_timer, enableTimer(_, _)).Times(1);
+  EXPECT_CALL(*timeout_timer, enableTimer(_, _));
 
   const std::string domain("www.foobaz.com");
   setup(forward_query_on_config);
@@ -908,10 +1006,10 @@ TEST_F(DnsFilterTest, ExternalResolutionTimeout2) {
              TestUtility::makeDnsResponse({"130.207.244.251"}));
 
   // parse the result
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 
   // Validate stats
   EXPECT_EQ(1, config_->stats().downstream_rx_queries_.value());
@@ -958,10 +1056,10 @@ TEST_F(DnsFilterTest, ExternalResolutionExceedMaxPendingLookups) {
 
   // Parse the result for the third query. Since the first two queries are
   // still in flight, the third query is the only one to generate a response
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(0, query_ctx_->answers_.size());
-  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(0, response_ctx_->answers_.size());
+  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, response_ctx_->getQueryResponseCode());
 
   // Validate stats
   EXPECT_EQ(3, config_->stats().downstream_rx_queries_.value());
@@ -987,14 +1085,14 @@ TEST_F(DnsFilterTest, ConsumeExternalJsonTableTest) {
   ASSERT_FALSE(query.empty());
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(2, query_ctx_->answers_.size());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(2, response_ctx_->answers_.size());
 
   // Verify the address returned
   const std::list<std::string> expected{"10.0.0.1", "10.0.0.2"};
-  for (const auto& answer : query_ctx_->answers_) {
+  for (const auto& answer : response_ctx_->answers_) {
     EXPECT_EQ(answer.first, domain);
     Utils::verifyAddress(expected, answer.second);
   }
@@ -1021,10 +1119,10 @@ TEST_F(DnsFilterTest, ConsumeExternalJsonTableTestNoIpv6Answer) {
   ASSERT_FALSE(query.empty());
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 
   // Validate stats
   ASSERT_EQ(1, config_->stats().downstream_rx_queries_.value());
@@ -1050,14 +1148,14 @@ TEST_F(DnsFilterTest, ConsumeExternalYamlTableTest) {
   ASSERT_FALSE(query.empty());
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(2, query_ctx_->answers_.size());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(2, response_ctx_->answers_.size());
 
   // Verify the address returned
   const std::list<std::string> expected{"10.0.0.1", "10.0.0.2"};
-  for (const auto& answer : query_ctx_->answers_) {
+  for (const auto& answer : response_ctx_->answers_) {
     EXPECT_EQ(answer.first, domain);
     Utils::verifyAddress(expected, answer.second);
   }
@@ -1093,13 +1191,13 @@ TEST_F(DnsFilterTest, RawBufferTest) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(1, query_ctx_->answers_.size());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(1, response_ctx_->answers_.size());
 
   // Verify that we have an answer record for the queried domain
-  const DnsAnswerRecordPtr& answer = query_ctx_->answers_.find(domain)->second;
+  const DnsAnswerRecordPtr& answer = response_ctx_->answers_.find(domain)->second;
 
   // Verify the address returned
   const std::list<std::string> expected{"10.0.3.1"};
@@ -1131,10 +1229,76 @@ TEST_F(DnsFilterTest, InvalidAnswersInQueryTest) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
+  EXPECT_EQ(0, config_->stats().queries_with_additional_rrs_.value());
+  EXPECT_EQ(1, config_->stats().queries_with_ans_or_authority_rrs_.value());
+}
+
+TEST_F(DnsFilterTest, InvalidAuthorityRRsInQueryTest) {
+  InSequence s;
+
+  setup(forward_query_off_config);
+  const std::string domain("www.foo3.com");
+
+  // Authority RRs count is non-zero in a query.
+  constexpr char dns_request[] = {
+      0x36, 0x6b,                               // Transaction ID
+      0x01, 0x20,                               // Flags
+      0x00, 0x01,                               // Questions
+      0x00, 0x00,                               // Answers
+      0x00, 0x01,                               // Authority RRs
+      0x00, 0x00,                               // Additional RRs
+      0x03, 0x77, 0x77, 0x77, 0x04, 0x66, 0x6f, // Query record for
+      0x6f, 0x33, 0x03, 0x63, 0x6f, 0x6d, 0x00, // www.foo3.com
+      0x00, 0x01,                               // Query Type - A
+      0x00, 0x01,                               // Query Class - IN
+  };
+
+  constexpr size_t count = sizeof(dns_request) / sizeof(dns_request[0]);
+  const std::string query = Utils::buildQueryFromBytes(dns_request, count);
+
+  sendQueryFromClient("10.0.0.1:1000", query);
+
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
+  EXPECT_EQ(0, config_->stats().queries_with_additional_rrs_.value());
+  EXPECT_EQ(1, config_->stats().queries_with_ans_or_authority_rrs_.value());
+}
+
+TEST_F(DnsFilterTest, IgnoreAdditionalRRsInQueryTest) {
+  InSequence s;
+
+  setup(forward_query_off_config);
+  const std::string domain("www.foo3.com");
+
+  // Additional RRs count is non-zero in a query.
+  constexpr char dns_request[] = {
+      0x36, 0x6b,                               // Transaction ID
+      0x01, 0x20,                               // Flags
+      0x00, 0x01,                               // Questions
+      0x00, 0x00,                               // Answers
+      0x00, 0x00,                               // Authority RRs
+      0x00, 0x01,                               // Additional RRs
+      0x03, 0x77, 0x77, 0x77, 0x04, 0x66, 0x6f, // Query record for
+      0x6f, 0x33, 0x03, 0x63, 0x6f, 0x6d, 0x00, // www.foo3.com
+      0x00, 0x01,                               // Query Type - A
+      0x00, 0x01,                               // Query Class - IN
+  };
+
+  constexpr size_t count = sizeof(dns_request) / sizeof(dns_request[0]);
+  const std::string query = Utils::buildQueryFromBytes(dns_request, count);
+
+  sendQueryFromClient("10.0.0.1:1000", query);
+
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(1, config_->stats().queries_with_additional_rrs_.value());
+  EXPECT_EQ(0, config_->stats().queries_with_ans_or_authority_rrs_.value());
 }
 
 TEST_F(DnsFilterTest, InvalidQueryNameTest) {
@@ -1162,9 +1326,9 @@ TEST_F(DnsFilterTest, InvalidQueryNameTest) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
 
   EXPECT_EQ(1, config_->stats().downstream_rx_invalid_queries_.value());
 }
@@ -1205,11 +1369,11 @@ TEST_F(DnsFilterTest, InvalidAnswerNameTest) {
   data.buffer_ = std::make_unique<Buffer::OwnedImpl>(dns_request, count);
   data.receive_time_ = MonotonicTime(std::chrono::seconds(0));
 
-  query_ctx_ = response_parser_->createQueryContext(data, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(data, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
   // We should have zero parsed answers
-  EXPECT_TRUE(query_ctx_->answers_.empty());
+  EXPECT_TRUE(response_ctx_->answers_.empty());
 }
 
 TEST_F(DnsFilterTest, InvalidAnswerTypeTest) {
@@ -1248,11 +1412,11 @@ TEST_F(DnsFilterTest, InvalidAnswerTypeTest) {
   data.buffer_ = std::make_unique<Buffer::OwnedImpl>(dns_request, count);
   data.receive_time_ = MonotonicTime(std::chrono::seconds(0));
 
-  query_ctx_ = response_parser_->createQueryContext(data, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(data, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
   // We should have zero parsed answers
-  EXPECT_TRUE(query_ctx_->answers_.empty());
+  EXPECT_TRUE(response_ctx_->answers_.empty());
 }
 
 TEST_F(DnsFilterTest, InvalidAnswerClassTest) {
@@ -1291,11 +1455,11 @@ TEST_F(DnsFilterTest, InvalidAnswerClassTest) {
   data.buffer_ = std::make_unique<Buffer::OwnedImpl>(dns_request, count);
   data.receive_time_ = MonotonicTime(std::chrono::seconds(0));
 
-  query_ctx_ = response_parser_->createQueryContext(data, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(data, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
   // We should have zero parsed answers
-  EXPECT_TRUE(query_ctx_->answers_.empty());
+  EXPECT_TRUE(response_ctx_->answers_.empty());
 }
 
 TEST_F(DnsFilterTest, InvalidAnswerAddressTest) {
@@ -1336,14 +1500,14 @@ TEST_F(DnsFilterTest, InvalidAnswerAddressTest) {
   data.receive_time_ = MonotonicTime(std::chrono::seconds(0));
 
   setup(forward_query_off_config);
-  query_ctx_ = response_parser_->createQueryContext(data, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(data, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
   // We should have one parsed query
-  EXPECT_FALSE(query_ctx_->queries_.empty());
+  EXPECT_FALSE(response_ctx_->queries_.empty());
 
   // We should have zero parsed answers due to the IP parsing failure
-  EXPECT_TRUE(query_ctx_->answers_.empty());
+  EXPECT_TRUE(response_ctx_->answers_.empty());
 }
 
 TEST_F(DnsFilterTest, InvalidAnswerDataLengthTest) {
@@ -1382,11 +1546,11 @@ TEST_F(DnsFilterTest, InvalidAnswerDataLengthTest) {
   data.buffer_ = std::make_unique<Buffer::OwnedImpl>(dns_request, count);
   data.receive_time_ = MonotonicTime(std::chrono::seconds(0));
 
-  query_ctx_ = response_parser_->createQueryContext(data, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(data, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
   // We should have zero parsed answers
-  EXPECT_TRUE(query_ctx_->answers_.empty());
+  EXPECT_TRUE(response_ctx_->answers_.empty());
 }
 
 TEST_F(DnsFilterTest, TruncatedAnswerRecordTest) {
@@ -1422,14 +1586,14 @@ TEST_F(DnsFilterTest, TruncatedAnswerRecordTest) {
   data.receive_time_ = MonotonicTime(std::chrono::seconds(0));
 
   setup(forward_query_off_config);
-  query_ctx_ = response_parser_->createQueryContext(data, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(data, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
   // We should have one parsed query
-  EXPECT_FALSE(query_ctx_->queries_.empty());
+  EXPECT_FALSE(response_ctx_->queries_.empty());
 
   // We should have zero parsed answers due to the IP parsing failure
-  EXPECT_TRUE(query_ctx_->answers_.empty());
+  EXPECT_TRUE(response_ctx_->answers_.empty());
 }
 
 TEST_F(DnsFilterTest, TruncatedQueryBufferTest) {
@@ -1458,38 +1622,28 @@ TEST_F(DnsFilterTest, TruncatedQueryBufferTest) {
   data.buffer_ = std::make_unique<Buffer::OwnedImpl>(dns_request, count);
   data.receive_time_ = MonotonicTime(std::chrono::seconds(0));
 
-  query_ctx_ = response_parser_->createQueryContext(data, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = ResponseValidator::createResponseContext(data, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
   // We should have zero parsed answers
-  EXPECT_TRUE(query_ctx_->answers_.empty());
+  EXPECT_TRUE(response_ctx_->answers_.empty());
 }
 
-TEST_F(DnsFilterTest, InvalidQueryClassAndAnswerTypeTest) {
+TEST_F(DnsFilterTest, InvalidQueryClassTypeTest) {
   InSequence s;
 
-  // In this buffer the answer type is unsupported, and the query class is unsupported.
+  // In this buffer the query class is unsupported.
   constexpr unsigned char dns_request[] = {
       0x36, 0x6b,                               // Transaction ID
-      0x81, 0x80,                               // Flags
+      0x01, 0x20,                               // Flags
       0x00, 0x01,                               // Questions
-      0x00, 0x01,                               // Answers
+      0x00, 0x00,                               // Answers
       0x00, 0x00,                               // Authority RRs
-      0x00, 0x01,                               // Additional RRs
+      0x00, 0x00,                               // Additional RRs
       0x04, 0x69, 0x70, 0x76, 0x36, 0x02, 0x68, // Query record for
       0x65, 0x03, 0x6e, 0x65, 0x74, 0x00,       // ipv6.he.net
       0x00, 0x01,                               // Record Type
       0x00, 0x02,                               // Record Class
-      0x04, 0x69, 0x70, 0x76, 0x36, 0x02, 0x68, // Answer record for
-      0x65, 0x03, 0x6e, 0x65, 0x74, 0x00,       // ipv6.he.net
-      0x00, 0x17,                               // Answer Record Type
-      0x00, 0x01,                               // Answer Record Class
-      0x00, 0x00, 0x01, 0x19,                   // Answer TTL
-      0x00, 0x04,                               // Answer Data Length
-      0x42, 0xdc, 0x02, 0x4b,                   // Answer IP Address
-      0x00,                                     // Additional RR (we do not parse this)
-      0x00, 0x29, 0x10, 0x00,                   // UDP Payload Size (4096)
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   };
 
   constexpr size_t count = sizeof(dns_request) / sizeof(dns_request[0]);
@@ -1500,12 +1654,44 @@ TEST_F(DnsFilterTest, InvalidQueryClassAndAnswerTypeTest) {
   data.buffer_ = std::make_unique<Buffer::OwnedImpl>(dns_request, count);
   data.receive_time_ = MonotonicTime(std::chrono::seconds(0));
 
-  query_ctx_ = response_parser_->createQueryContext(data, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
+  response_ctx_ = query_parser_->createQueryContext(data, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
 
   // We should have zero parsed queries or answers
-  EXPECT_TRUE(query_ctx_->queries_.empty());
-  EXPECT_TRUE(query_ctx_->answers_.empty());
+  EXPECT_TRUE(response_ctx_->queries_.empty());
+  EXPECT_TRUE(response_ctx_->answers_.empty());
+}
+
+TEST_F(DnsFilterTest, InsufficientDataforQueryRecord) {
+  InSequence s;
+
+  // In this buffer the query data is insufficient.
+  constexpr unsigned char dns_request[] = {
+      0x36, 0x6b,                               // Transaction ID
+      0x01, 0x20,                               // Flags
+      0x00, 0x01,                               // Questions
+      0x00, 0x00,                               // Answers
+      0x00, 0x00,                               // Authority RRs
+      0x00, 0x00,                               // Additional RRs
+      0x04, 0x69, 0x70, 0x76, 0x36, 0x02, 0x68, // Query record for
+      0x65, 0x03, 0x6e, 0x65, 0x74, 0x00,       // ipv6.he.net
+      0x00, 0x01,                               // Record Type
+  };
+
+  constexpr size_t count = sizeof(dns_request) / sizeof(dns_request[0]);
+
+  Network::UdpRecvData data{};
+  data.addresses_.peer_ = Network::Utility::parseInternetAddressAndPort("10.0.0.1:1000");
+  data.addresses_.local_ = listener_address_;
+  data.buffer_ = std::make_unique<Buffer::OwnedImpl>(dns_request, count);
+  data.receive_time_ = MonotonicTime(std::chrono::seconds(0));
+
+  response_ctx_ = query_parser_->createQueryContext(data, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
+
+  // We should have zero parsed queries or answers
+  EXPECT_TRUE(response_ctx_->queries_.empty());
+  EXPECT_TRUE(response_ctx_->answers_.empty());
 }
 
 TEST_F(DnsFilterTest, InvalidQueryNameTest2) {
@@ -1532,9 +1718,9 @@ TEST_F(DnsFilterTest, InvalidQueryNameTest2) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
 
   // TODO(abaptiste): underflow/overflow stats
   EXPECT_EQ(1, config_->stats().downstream_rx_invalid_queries_.value());
@@ -1570,13 +1756,13 @@ TEST_F(DnsFilterTest, MultipleQueryCountTest) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
 
   EXPECT_EQ(1, config_->stats().downstream_rx_invalid_queries_.value());
   EXPECT_EQ(0, config_->stats().a_record_queries_.value());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 }
 
 TEST_F(DnsFilterTest, InvalidQueryCountTest) {
@@ -1602,13 +1788,13 @@ TEST_F(DnsFilterTest, InvalidQueryCountTest) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
 
   EXPECT_EQ(0, config_->stats().a_record_queries_.value());
   EXPECT_EQ(1, config_->stats().downstream_rx_invalid_queries_.value());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 }
 
 TEST_F(DnsFilterTest, InvalidNameLabelTest) {
@@ -1635,13 +1821,13 @@ TEST_F(DnsFilterTest, InvalidNameLabelTest) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
 
   EXPECT_EQ(0, config_->stats().a_record_queries_.value());
   EXPECT_EQ(1, config_->stats().downstream_rx_invalid_queries_.value());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 }
 
 TEST_F(DnsFilterTest, NotImplementedQueryTest) {
@@ -1668,41 +1854,12 @@ TEST_F(DnsFilterTest, NotImplementedQueryTest) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NOT_IMPLEMENTED, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NOT_IMPLEMENTED, response_ctx_->getQueryResponseCode());
 
   EXPECT_EQ(0, config_->stats().a_record_queries_.value());
   EXPECT_EQ(0, config_->stats().downstream_rx_invalid_queries_.value());
-}
-
-TEST_F(DnsFilterTest, NotImplementedAuthorityRRTest) {
-  InSequence s;
-
-  setup(forward_query_off_config);
-  // This buffer specifies that 4 Authority Resource records exist. We should return a
-  // "not implemented" response code
-  constexpr char dns_request[] = {
-      0x36, 0x70,                               // Transaction ID
-      0x01, 0x20,                               // Flags
-      0x00, 0x01,                               // Questions
-      0x00, 0x00,                               // Answers
-      0x00, 0x04,                               // Authority RRs
-      0x00, 0x00,                               // Additional RRs
-      0x03, 0x77, 0x77, 0x77, 0x04, 0x66, 0x6f, // Query record for
-      0x6f, 0x33, 0x03, 0x63, 0x6f, 0x6d, 0x00, // www.foo3.com
-      0x00, 0x05,                               // Query Type - CNAME
-      0x00, 0x01,                               // Query Class - IN
-  };
-
-  constexpr size_t count = sizeof(dns_request) / sizeof(dns_request[0]);
-  const std::string query = Utils::buildQueryFromBytes(dns_request, count);
-
-  sendQueryFromClient("10.0.0.1:1000", query);
-
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NOT_IMPLEMENTED, query_ctx_->getQueryResponseCode());
 }
 
 TEST_F(DnsFilterTest, NoTransactionIdTest) {
@@ -1729,9 +1886,9 @@ TEST_F(DnsFilterTest, NoTransactionIdTest) {
 
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
 }
 
 TEST_F(DnsFilterTest, InvalidShortBufferTest) {
@@ -1743,9 +1900,9 @@ TEST_F(DnsFilterTest, InvalidShortBufferTest) {
   const std::string query = Utils::buildQueryFromBytes(dns_request, 1);
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_FALSE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_FALSE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_FORMAT_ERROR, response_ctx_->getQueryResponseCode());
 
   EXPECT_EQ(0, config_->stats().a_record_queries_.value());
   EXPECT_EQ(1, config_->stats().downstream_rx_invalid_queries_.value());
@@ -1762,12 +1919,12 @@ TEST_F(DnsFilterTest, RandomizeFirstAnswerTest) {
   ASSERT_FALSE(query.empty());
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
 
   // Although 16 addresses are defined, only 8 are returned
-  EXPECT_EQ(8, query_ctx_->answers_.size());
+  EXPECT_EQ(8, response_ctx_->answers_.size());
 
   // We shuffle the list of addresses when we read the config, and in the case of more than
   // 8 defined addresses, we randomize the initial starting index. We should not end up with
@@ -1776,7 +1933,7 @@ TEST_F(DnsFilterTest, RandomizeFirstAnswerTest) {
   const std::list<std::string> defined_order{"10.0.16.1", "10.0.16.2", "10.0.16.3", "10.0.16.4",
                                              "10.0.16.5", "10.0.16.6", "10.0.16.7", "10.0.16.8"};
   auto defined_answer_iter = defined_order.begin();
-  for (const auto& answer : query_ctx_->answers_) {
+  for (const auto& answer : response_ctx_->answers_) {
     const auto resolved_address = answer.second->ip_addr_->ip()->addressAsString();
     EXPECT_NE(0L, resolved_address.compare(*defined_answer_iter++));
   }
@@ -1797,9 +1954,9 @@ TEST_F(DnsFilterTest, ConsumeExternalTableWithServicesTest) {
   ASSERT_FALSE(query.empty());
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
 
   std::map<uint16_t, std::string> validation_weight_map = {
       {10, "backup.voip.subzero.com"},
@@ -1817,8 +1974,8 @@ TEST_F(DnsFilterTest, ConsumeExternalTableWithServicesTest) {
 
   // Validate the weight for each SRV record. The TTL and priority are the same value for each
   // entry
-  EXPECT_EQ(validation_weight_map.size(), query_ctx_->answers_.size());
-  for (const auto& answer : query_ctx_->answers_) {
+  EXPECT_EQ(validation_weight_map.size(), response_ctx_->answers_.size());
+  for (const auto& answer : response_ctx_->answers_) {
     EXPECT_EQ(answer.second->type_, DNS_RECORD_TYPE_SRV);
 
     DnsSrvRecord* srv_rec = dynamic_cast<DnsSrvRecord*>(answer.second.get());
@@ -1850,8 +2007,8 @@ TEST_F(DnsFilterTest, ConsumeExternalTableWithServicesTest) {
   };
   const size_t target_size = target_map.size();
 
-  EXPECT_EQ(target_map.size(), query_ctx_->additional_.size());
-  for (const auto& [hostname, address] : query_ctx_->additional_) {
+  EXPECT_EQ(target_map.size(), response_ctx_->additional_.size());
+  for (const auto& [hostname, address] : response_ctx_->additional_) {
     const auto& entry = target_map.find(hostname);
     EXPECT_NE(entry, target_map.end());
     Utils::verifyAddress({entry->second}, address);
@@ -1895,12 +2052,12 @@ TEST_F(DnsFilterTest, SrvTargetResolution) {
     ASSERT_FALSE(query.empty());
     sendQueryFromClient("10.0.0.1:1000", query);
 
-    query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-    EXPECT_TRUE(query_ctx_->parse_status_);
-    EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
-    EXPECT_EQ(1, query_ctx_->answers_.size());
+    response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+    EXPECT_TRUE(response_ctx_->parse_status_);
+    EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+    EXPECT_EQ(1, response_ctx_->answers_.size());
 
-    const DnsAnswerRecordPtr& answer = query_ctx_->answers_.find(domain)->second;
+    const DnsAnswerRecordPtr& answer = response_ctx_->answers_.find(domain)->second;
     Utils::verifyAddress({ip}, answer);
   }
 
@@ -1928,10 +2085,10 @@ TEST_F(DnsFilterTest, NonExistentClusterServiceLookup) {
   ASSERT_FALSE(query.empty());
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(0, query_ctx_->answers_.size());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(0, response_ctx_->answers_.size());
 
   // Validate stats
   EXPECT_EQ(1, config_->stats().downstream_rx_queries_.value());
@@ -1966,12 +2123,12 @@ TEST_F(DnsFilterTest, SrvRecordQuery) {
   const std::string query = Utils::buildQueryFromBytes(dns_request, count);
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, query_ctx_->getQueryResponseCode());
-  EXPECT_EQ(1, query_ctx_->queries_.size());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NAME_ERROR, response_ctx_->getQueryResponseCode());
+  EXPECT_EQ(1, response_ctx_->queries_.size());
 
-  const auto& parsed_query = query_ctx_->queries_.front();
+  const auto& parsed_query = response_ctx_->queries_.front();
   EXPECT_EQ(parsed_query->type_, DNS_RECORD_TYPE_SRV);
   EXPECT_STREQ("_ldap._tcp.Default-First-Site-Name._sites.dc._msdcs.utelsystems.local",
                parsed_query->name_.c_str());
@@ -1997,13 +2154,13 @@ TEST_F(DnsFilterTest, SrvQueryMaxRecords) {
   ASSERT_FALSE(query.empty());
   sendQueryFromClient("10.0.0.1:1000", query);
 
-  query_ctx_ = response_parser_->createQueryContext(udp_response_, counters_);
-  EXPECT_TRUE(query_ctx_->parse_status_);
-  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, query_ctx_->getQueryResponseCode());
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
 
   // We can only serialize 7 records before reaching the 512 byte limit
-  EXPECT_LT(query_ctx_->answers_.size(), MAX_RETURNED_RECORDS);
-  EXPECT_LT(query_ctx_->additional_.size(), MAX_RETURNED_RECORDS);
+  EXPECT_LT(response_ctx_->answers_.size(), MAX_RETURNED_RECORDS);
+  EXPECT_LT(response_ctx_->additional_.size(), MAX_RETURNED_RECORDS);
 
   const std::list<std::string> hosts{
       "one.web.ermac.com",  "two.web.ermac.com", "three.web.ermac.com", "four.web.ermac.com",
@@ -2013,7 +2170,7 @@ TEST_F(DnsFilterTest, SrvQueryMaxRecords) {
   // Verify the service name and targets are sufficiently randomized
   size_t exact_matches = 0;
   auto host = hosts.begin();
-  for (const auto& answer : query_ctx_->answers_) {
+  for (const auto& answer : response_ctx_->answers_) {
     EXPECT_EQ(answer.second->type_, DNS_RECORD_TYPE_SRV);
     DnsSrvRecord* srv_rec = dynamic_cast<DnsSrvRecord*>(answer.second.get());
 
@@ -2021,17 +2178,252 @@ TEST_F(DnsFilterTest, SrvQueryMaxRecords) {
 
     const auto target = srv_rec->targets_.begin();
     const auto target_name = target->first;
-    exact_matches += (target_name.compare(*host++) == 0);
+    exact_matches += (target_name == *host++);
   }
   EXPECT_LT(exact_matches, hosts.size());
 
   // Verify that the additional records are not in the same order as the configuration
   exact_matches = 0;
   host = hosts.begin();
-  for (const auto& answer : query_ctx_->additional_) {
-    exact_matches += (answer.first.compare(*host++) == 0);
+  for (const auto& answer : response_ctx_->additional_) {
+    exact_matches += (answer.first == *host++);
   }
   EXPECT_LT(exact_matches, hosts.size());
+}
+
+TEST_F(DnsFilterTest, DnsResolverOptionsNotSet) {
+  InSequence s;
+
+  std::string temp_path =
+      TestEnvironment::writeStringToFileForTest("dns_table.yaml", max_records_table_yaml);
+  std::string config_to_use = fmt::format(dns_resolver_options_config_not_set, temp_path);
+  setup(config_to_use);
+  // `false` here means use_tcp_for_dns_lookups is not set via dns filter config
+  EXPECT_EQ(false, dns_resolver_options_.use_tcp_for_dns_lookups());
+  // `false` here means no_default_search_domain is not set via dns filter config
+  EXPECT_EQ(false, dns_resolver_options_.no_default_search_domain());
+}
+
+TEST_F(DnsFilterTest, DnsResolverOptionsSetTrue) {
+  InSequence s;
+
+  std::string temp_path =
+      TestEnvironment::writeStringToFileForTest("dns_table.yaml", max_records_table_yaml);
+  std::string config_to_use = fmt::format(dns_resolver_options_config_set_true, temp_path);
+  setup(config_to_use);
+
+  // `true` here means use_tcp_for_dns_lookups is set true
+  EXPECT_EQ(true, dns_resolver_options_.use_tcp_for_dns_lookups());
+  // `true` here means no_default_search_domain is set true
+  EXPECT_EQ(true, dns_resolver_options_.no_default_search_domain());
+}
+
+TEST_F(DnsFilterTest, DnsResolverOptionsSetFalse) {
+  InSequence s;
+
+  std::string temp_path =
+      TestEnvironment::writeStringToFileForTest("dns_table.yaml", max_records_table_yaml);
+  std::string config_to_use = fmt::format(dns_resolver_options_config_set_false, temp_path);
+  setup(config_to_use);
+
+  // `false` here means use_tcp_for_dns_lookups is set true
+  EXPECT_EQ(false, dns_resolver_options_.use_tcp_for_dns_lookups());
+  // `false` here means no_default_search_domain is set true
+  EXPECT_EQ(false, dns_resolver_options_.no_default_search_domain());
+}
+
+TEST_F(DnsFilterTest, DEPRECATED_FEATURE_TEST(DnsResolutionConfigExist)) {
+  const std::string dns_resolution_config_exist = R"EOF(
+stat_prefix: "my_prefix"
+client_config:
+  resolver_timeout: 1s
+  dns_resolution_config:
+    dns_resolver_options:
+      use_tcp_for_dns_lookups: false
+      no_default_search_domain: false
+    resolvers:
+    - socket_address:
+        address: "1.1.1.1"
+        port_value: 53
+  max_pending_lookups: 256
+server_config:
+  external_dns_table:
+    filename: {}
+)EOF";
+
+  InSequence s;
+
+  std::string temp_path =
+      TestEnvironment::writeStringToFileForTest("dns_table.yaml", max_records_table_yaml);
+  std::string config_to_use = fmt::format(dns_resolution_config_exist, temp_path);
+  setup(config_to_use);
+
+  EXPECT_EQ(false, dns_resolver_options_.use_tcp_for_dns_lookups());
+  EXPECT_EQ(false, dns_resolver_options_.no_default_search_domain());
+
+  // address matches
+  auto resolvers = envoy::config::core::v3::Address();
+  resolvers.mutable_socket_address()->set_address("1.1.1.1");
+  resolvers.mutable_socket_address()->set_port_value(53);
+
+  EXPECT_EQ(true, TestUtility::protoEqual(cares_.resolvers(0), resolvers));
+}
+
+// test typed_dns_resolver_config exits which overrides dns_resolution_config.
+TEST_F(DnsFilterTest, DEPRECATED_FEATURE_TEST(TypedDnsResolverConfigOverrideDnsResolutionConfig)) {
+  const std::string typed_dns_resolver_config_exist = R"EOF(
+stat_prefix: "my_prefix"
+client_config:
+  resolver_timeout: 1s
+  dns_resolution_config:
+    dns_resolver_options:
+      use_tcp_for_dns_lookups: false
+      no_default_search_domain: false
+    resolvers:
+    - socket_address:
+        address: "1.1.1.1"
+        port_value: 53
+  typed_dns_resolver_config:
+    name: envoy.network.dns_resolver.cares
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+      resolvers:
+      - socket_address:
+          address: "1.2.3.4"
+          port_value: 80
+      dns_resolver_options:
+        use_tcp_for_dns_lookups: true
+        no_default_search_domain: true
+  max_pending_lookups: 256
+server_config:
+  external_dns_table:
+    filename: {}
+)EOF";
+
+  InSequence s;
+
+  std::string temp_path =
+      TestEnvironment::writeStringToFileForTest("dns_table.yaml", max_records_table_yaml);
+  std::string config_to_use = fmt::format(typed_dns_resolver_config_exist, temp_path);
+  setup(config_to_use);
+
+  EXPECT_EQ(true, dns_resolver_options_.use_tcp_for_dns_lookups());
+  EXPECT_EQ(true, dns_resolver_options_.no_default_search_domain());
+
+  // address matches
+  auto resolvers = envoy::config::core::v3::Address();
+  resolvers.mutable_socket_address()->set_address("1.2.3.4");
+  resolvers.mutable_socket_address()->set_port_value(80);
+  EXPECT_EQ(true, TestUtility::protoEqual(cares_.resolvers(0), resolvers));
+}
+
+// test typed_dns_resolver_config exits.
+TEST_F(DnsFilterTest, TypedDnsResolverConfigExist) {
+  const std::string typed_dns_resolver_config_exist = R"EOF(
+stat_prefix: "my_prefix"
+client_config:
+  resolver_timeout: 1s
+  typed_dns_resolver_config:
+    name: envoy.network.dns_resolver.cares
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.network.dns_resolver.cares.v3.CaresDnsResolverConfig
+      resolvers:
+      - socket_address:
+          address: "1.2.3.4"
+          port_value: 80
+      dns_resolver_options:
+        use_tcp_for_dns_lookups: true
+        no_default_search_domain: true
+  max_pending_lookups: 256
+server_config:
+  external_dns_table:
+    filename: {}
+)EOF";
+
+  InSequence s;
+
+  std::string temp_path =
+      TestEnvironment::writeStringToFileForTest("dns_table.yaml", max_records_table_yaml);
+  std::string config_to_use = fmt::format(typed_dns_resolver_config_exist, temp_path);
+  setup(config_to_use);
+
+  EXPECT_EQ(true, dns_resolver_options_.use_tcp_for_dns_lookups());
+  EXPECT_EQ(true, dns_resolver_options_.no_default_search_domain());
+
+  // address matches
+  auto resolvers = envoy::config::core::v3::Address();
+  resolvers.mutable_socket_address()->set_address("1.2.3.4");
+  resolvers.mutable_socket_address()->set_port_value(80);
+  EXPECT_EQ(true, TestUtility::protoEqual(cares_.resolvers(0), resolvers));
+}
+
+// test when no DNS related config exists, an empty typed_dns_resolver_config is the parameter.
+TEST_F(DnsFilterTest, NoDnsConfigExist) {
+  const std::string no_dns_config_exist = R"EOF(
+stat_prefix: "my_prefix"
+client_config:
+  resolver_timeout: 1s
+  max_pending_lookups: 256
+server_config:
+  external_dns_table:
+    filename: {}
+)EOF";
+
+  InSequence s;
+
+  std::string temp_path =
+      TestEnvironment::writeStringToFileForTest("dns_table.yaml", max_records_table_yaml);
+  std::string config_to_use = fmt::format(no_dns_config_exist, temp_path);
+  setup(config_to_use);
+
+  EXPECT_EQ(false, dns_resolver_options_.use_tcp_for_dns_lookups());
+  EXPECT_EQ(false, dns_resolver_options_.no_default_search_domain());
+
+  // No address
+  EXPECT_EQ(0, cares_.resolvers().size());
+}
+
+// Verify downstream send and receive error handling.
+TEST_F(DnsFilterTest, SendReceiveErrorHandling) {
+  InSequence s;
+
+  setup(forward_query_off_config);
+
+  filter_->onReceiveError(Api::IoError::IoErrorCode::UnknownError);
+  EXPECT_EQ(1, config_->stats().downstream_rx_errors_.value());
+}
+
+TEST_F(DnsFilterTest, DEPRECATED_FEATURE_TEST(DeprecatedKnownSuffixes)) {
+  InSequence s;
+
+  const std::string config_using_known_suffixes = R"EOF(
+stat_prefix: "my_prefix"
+server_config:
+  inline_dns_table:
+    external_retry_count: 0
+    known_suffixes:
+    - suffix: "foo1.com"
+    virtual_domains:
+      - name: "www.foo1.com"
+        endpoint:
+          address_list:
+            address:
+            - "10.0.0.1"
+)EOF";
+  setup(config_using_known_suffixes);
+
+  const std::string query =
+      Utils::buildQueryForDomain("www.foo1.com", DNS_RECORD_TYPE_A, DNS_RECORD_CLASS_IN);
+  ASSERT_FALSE(query.empty());
+  sendQueryFromClient("10.0.0.1:1000", query);
+
+  response_ctx_ = ResponseValidator::createResponseContext(udp_response_, counters_);
+  EXPECT_TRUE(response_ctx_->parse_status_);
+  EXPECT_EQ(DNS_RESPONSE_CODE_NO_ERROR, response_ctx_->getQueryResponseCode());
+
+  // Validate stats
+  EXPECT_EQ(1, config_->stats().downstream_rx_queries_.value());
+  EXPECT_EQ(1, config_->stats().known_domain_queries_.value());
 }
 
 } // namespace

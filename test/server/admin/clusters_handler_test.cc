@@ -13,12 +13,12 @@ INSTANTIATE_TEST_SUITE_P(IpVersions, AdminInstanceTest,
                          testing::ValuesIn(TestEnvironment::getIpVersionsForTest()),
                          TestUtility::ipTestParamsToString);
 
-TEST_P(AdminInstanceTest, ClustersJson) {
-  Upstream::ClusterManager::ClusterInfoMap cluster_map;
-  ON_CALL(server_.cluster_manager_, clusters()).WillByDefault(ReturnPointee(&cluster_map));
+TEST_P(AdminInstanceTest, ClustersJsonAndText) {
+  Upstream::ClusterManager::ClusterInfoMaps cluster_maps;
+  ON_CALL(server_.cluster_manager_, clusters()).WillByDefault(ReturnPointee(&cluster_maps));
 
   NiceMock<Upstream::MockClusterMockPrioritySet> cluster;
-  cluster_map.emplace(cluster.info_->name_, cluster);
+  cluster_maps.active_clusters_.emplace(cluster.info_->name_, cluster);
 
   NiceMock<Upstream::Outlier::MockDetector> outlier_detector;
   ON_CALL(Const(cluster), outlierDetector()).WillByDefault(Return(&outlier_detector));
@@ -32,6 +32,7 @@ TEST_P(AdminInstanceTest, ClustersJson) {
       .WillByDefault(Return(9.0));
 
   ON_CALL(*cluster.info_, addedViaApi()).WillByDefault(Return(true));
+  ON_CALL(*cluster.info_, edsServiceName()).WillByDefault(Return("potato_launcher"));
 
   Upstream::MockHostSet* host_set = cluster.priority_set_.getMockHostSet(0);
   auto host = std::make_shared<NiceMock<Upstream::MockHost>>();
@@ -106,6 +107,8 @@ TEST_P(AdminInstanceTest, ClustersJson) {
  "cluster_statuses": [
   {
    "name": "fake_cluster",
+   "observability_name": "observability_name",
+   "eds_service_name": "potato_launcher",
    "success_rate_ejection_threshold": {
     "value": 6
    },
@@ -203,7 +206,8 @@ TEST_P(AdminInstanceTest, ClustersJson) {
   // Ensure that the normal text format is used by default.
   Buffer::OwnedImpl response2;
   EXPECT_EQ(Http::Code::OK, getCallback("/clusters", header_map, response2));
-  const std::string expected_text = R"EOF(fake_cluster::outlier::success_rate_average::0
+  const std::string expected_text = R"EOF(fake_cluster::observability_name::observability_name
+fake_cluster::outlier::success_rate_average::0
 fake_cluster::outlier::success_rate_ejection_threshold::6
 fake_cluster::outlier::local_origin_success_rate_average::0
 fake_cluster::outlier::local_origin_success_rate_ejection_threshold::9
@@ -216,6 +220,7 @@ fake_cluster::high_priority::max_pending_requests::1024
 fake_cluster::high_priority::max_requests::1024
 fake_cluster::high_priority::max_retries::1
 fake_cluster::added_via_api::true
+fake_cluster::eds_service_name::potato_launcher
 fake_cluster::1.2.3.4:80::arest_counter::5
 fake_cluster::1.2.3.4:80::atest_gauge::10
 fake_cluster::1.2.3.4:80::rest_counter::10

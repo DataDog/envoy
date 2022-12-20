@@ -6,10 +6,10 @@
 #include "envoy/config/endpoint/v3/endpoint.pb.validate.h"
 #include "envoy/service/discovery/v3/discovery.pb.h"
 
-#include "common/config/filesystem_subscription_impl.h"
-#include "common/config/utility.h"
-#include "common/event/dispatcher_impl.h"
-#include "common/protobuf/utility.h"
+#include "source/common/config/filesystem_subscription_impl.h"
+#include "source/common/config/utility.h"
+#include "source/common/event/dispatcher_impl.h"
+#include "source/common/protobuf/utility.h"
 
 #include "test/common/config/subscription_test_harness.h"
 #include "test/mocks/config/mocks.h"
@@ -32,18 +32,20 @@ namespace Config {
 class FilesystemSubscriptionTestHarness : public SubscriptionTestHarness {
 public:
   FilesystemSubscriptionTestHarness()
-      : path_(TestEnvironment::temporaryPath("eds.json")),
+      : path_(makePathConfigSource(TestEnvironment::temporaryPath("eds.json"))),
         api_(Api::createApiForTest(stats_store_, simTime())), dispatcher_(setupDispatcher()),
+        resource_decoder_(std::make_shared<TestUtility::TestOpaqueResourceDecoderImpl<
+                              envoy::config::endpoint::v3::ClusterLoadAssignment>>("cluster_name")),
         subscription_(*dispatcher_, path_, callbacks_, resource_decoder_, stats_,
                       validation_visitor_, *api_) {}
 
-  ~FilesystemSubscriptionTestHarness() override { TestEnvironment::removePath(path_); }
+  ~FilesystemSubscriptionTestHarness() override { TestEnvironment::removePath(path_.path()); }
 
   Event::DispatcherPtr setupDispatcher() {
     auto dispatcher = std::make_unique<Event::MockDispatcher>();
     EXPECT_CALL(*dispatcher, createFilesystemWatcher_()).WillOnce(InvokeWithoutArgs([this] {
       Filesystem::MockWatcher* mock_watcher = new Filesystem::MockWatcher();
-      EXPECT_CALL(*mock_watcher, addWatch(path_, Filesystem::Watcher::Events::MovedTo, _))
+      EXPECT_CALL(*mock_watcher, addWatch(path_.path(), Filesystem::Watcher::Events::MovedTo, _))
           .WillOnce(Invoke([this](absl::string_view, uint32_t,
                                   Filesystem::Watcher::OnChangedCb cb) { on_changed_cb_ = cb; }));
       return mock_watcher;
@@ -52,19 +54,19 @@ public:
   }
 
   void startSubscription(const std::set<std::string>& cluster_names) override {
-    std::ifstream config_file(path_);
+    std::ifstream config_file(path_.path());
     file_at_start_ = config_file.good();
-    subscription_.start(cluster_names);
+    subscription_.start(flattenResources(cluster_names));
   }
 
   void updateResourceInterest(const std::set<std::string>& cluster_names) override {
-    subscription_.updateResourceInterest(cluster_names);
+    subscription_.updateResourceInterest(flattenResources(cluster_names));
   }
 
   void updateFile(const std::string& json, bool run_dispatcher = true) {
     // Write JSON contents to file, rename to path_ and invoke on change callback
     const std::string temp_path = TestEnvironment::writeStringToFileForTest("eds.json.tmp", json);
-    TestEnvironment::renameFile(temp_path, path_);
+    TestEnvironment::renameFile(temp_path, path_.path());
     if (run_dispatcher) {
       on_changed_cb_(Filesystem::Watcher::Events::MovedTo);
     }
@@ -82,7 +84,7 @@ public:
     std::string file_json = "{\"versionInfo\":\"" + version + "\",\"resources\":[";
     for (const auto& cluster : cluster_names) {
       file_json += "{\"@type\":\"type.googleapis.com/"
-                   "envoy.api.v2.ClusterLoadAssignment\",\"clusterName\":\"" +
+                   "envoy.config.endpoint.v3.ClusterLoadAssignment\",\"clusterName\":\"" +
                    cluster + "\"},";
     }
     file_json.pop_back();
@@ -125,7 +127,7 @@ public:
     // initial_fetch_timeout not implemented
   }
 
-  const std::string path_;
+  const envoy::config::core::v3::PathConfigSource path_;
   std::string version_;
   Stats::IsolatedStoreImpl stats_store_;
   NiceMock<ProtobufMessage::MockValidationVisitor> validation_visitor_;
@@ -133,8 +135,7 @@ public:
   Event::DispatcherPtr dispatcher_;
   Filesystem::Watcher::OnChangedCb on_changed_cb_;
   NiceMock<Config::MockSubscriptionCallbacks> callbacks_;
-  TestUtility::TestOpaqueResourceDecoderImpl<envoy::config::endpoint::v3::ClusterLoadAssignment>
-      resource_decoder_{"cluster_name"};
+  OpaqueResourceDecoderSharedPtr resource_decoder_;
   FilesystemSubscriptionImpl subscription_;
   bool file_at_start_{false};
 };

@@ -1,7 +1,11 @@
 .. _install_sandboxes_grpc_bridge:
 
-gRPC Bridge
+gRPC bridge
 ===========
+
+.. sidebar:: Requirements
+
+   .. include:: _include/docker-env-setup-link.rst
 
 The gRPC bridge sandbox is an example usage of Envoy's
 :ref:`gRPC bridge filter <config_http_filters_grpc_bridge>`.
@@ -9,23 +13,25 @@ The gRPC bridge sandbox is an example usage of Envoy's
 This is an example of a key-value store where an ``http``-based client CLI, written in ``Python``,
 updates a remote store, written in ``Go``, using the stubs generated for both languages.
 
-The client send messages through a proxy that upgrades the HTTP requests from ``http/1.1`` to ``http/2``.
+The client send messages through a proxy that upgrades the HTTP requests from ``http/1.1`` to ``http/2`` or
+``http/3``
 
 ``[client](http/1.1) -> [client-egress-proxy](http/2) -> [server-ingress-proxy](http/2) -> [server]``
 
 Another Envoy feature demonstrated in this example is Envoy's ability to do authority
 base routing via its route configuration.
 
-.. include:: _include/docker-env-setup.rst
-
-Step 3: Generate the protocol stubs
+Step 1: Generate the protocol stubs
 ***********************************
+
+Change to the ``examples/grpc-bridge`` directory.
 
 A docker-compose file is provided that generates the stubs for both ``client`` and ``server`` from the
 specification in the ``protos`` directory.
 
-Inspecting the ``docker-compose-protos.yaml`` file, you will see that it contains both the ``python``
-and ``go`` gRPC protoc commands necessary for generating the protocol stubs.
+Inspecting the :download:`docker-compose-protos.yaml <_include/grpc-bridge/docker-compose-protos.yaml>` file,
+you will see that it contains both the ``python`` and ``go`` gRPC protoc commands necessary for generating the
+protocol stubs.
 
 Generate the stubs as follows:
 
@@ -59,7 +65,7 @@ respective directories:
 
 These generated ``python`` and ``go`` stubs can be included as external modules.
 
-Step 4: Start all of our containers
+Step 2: Start all of our containers
 ***********************************
 
 To build this sandbox example and start the example services, run the following commands:
@@ -79,7 +85,7 @@ To build this sandbox example and start the example services, run the following 
     grpc-bridge_grpc-server-proxy_1        /docker-entrypoint.sh /bin ... Up      10000/tcp, 0.0.0.0:8811->8811/tcp
     grpc-bridge_grpc-server_1              /bin/sh -c /bin/server         Up      0.0.0.0:8081->8081/tcp
 
-Step 5: Send requests to the Key/Value store
+Step 3: Send requests to the Key/Value store
 ********************************************
 
 To use the Python service and send gRPC requests:
@@ -93,7 +99,7 @@ Set a key:
 
 .. code-block:: console
 
-  $ docker-compose exec python /client/client.py set foo bar
+  $ docker-compose exec grpc-client python /client/grpc-kv-client.py set foo bar
   setf foo to bar
 
 
@@ -101,21 +107,21 @@ Get a key:
 
 .. code-block:: console
 
-  $ docker-compose exec python /client/client.py get foo
+  $ docker-compose exec grpc-client python /client/grpc-kv-client.py get foo
   bar
 
 Modify an existing key:
 
 .. code-block:: console
 
-  $ docker-compose exec python /client/client.py set foo baz
+  $ docker-compose exec grpc-client python /client/grpc-kv-client.py set foo baz
   setf foo to baz
 
 Get the modified key:
 
 .. code-block:: console
 
-  $ docker-compose exec python /client/client.py get foo
+  $ docker-compose exec grpc-client python /client/grpc-kv-client.py get foo
   baz
 
 In the running docker-compose container, you should see the gRPC service printing a record of its activity:
@@ -126,3 +132,8 @@ In the running docker-compose container, you should see the gRPC service printin
   grpc_1    | 2017/05/30 12:05:09 set: foo = bar
   grpc_1    | 2017/05/30 12:05:12 get: foo
   grpc_1    | 2017/05/30 12:05:18 set: foo = baz
+
+.. seealso::
+
+   :ref:`gRPC bridge filter <config_http_filters_grpc_bridge>`.
+      Learn more about configuring Envoy's gRPC bridge filter.

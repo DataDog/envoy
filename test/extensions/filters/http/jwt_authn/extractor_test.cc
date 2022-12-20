@@ -1,8 +1,7 @@
 #include "envoy/extensions/filters/http/jwt_authn/v3/config.pb.h"
 
-#include "common/protobuf/utility.h"
-
-#include "extensions/filters/http/jwt_authn/extractor.h"
+#include "source/common/protobuf/utility.h"
+#include "source/extensions/filters/http/jwt_authn/extractor.h"
 
 #include "test/extensions/filters/http/jwt_authn/test_common.h"
 #include "test/test_common/utility.h"
@@ -55,12 +54,23 @@ providers:
     from_headers:
       - name: prefix-header
         value_prefix: '"CCCDDD"'
+  provider9:
+    issuer: issuer9
+    from_cookies:
+      - token-cookie
+      - token-cookie-2
+  provider10:
+    issuer: issuer10
+    from_cookies:
+      - token-cookie-3
 )";
 
 class ExtractorTest : public testing::Test {
 public:
-  void SetUp() override {
-    TestUtility::loadFromYaml(ExampleConfig, config_);
+  void SetUp() override { setUp(ExampleConfig); }
+
+  void setUp(const std::string& config_str) {
+    TestUtility::loadFromYaml(config_str, config_);
     JwtProviderList providers;
     for (const auto& it : config_.providers()) {
       providers.emplace_back(&it.second);
@@ -101,14 +111,19 @@ TEST_F(ExtractorTest, TestDefaultHeaderLocation) {
 
   // Only the issue1 is using default header location.
   EXPECT_EQ(tokens[0]->token(), "jwt_token");
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer1"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer1"));
 
   // Other issuers are using custom locations
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer2"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer3"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer4"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer5"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("unknown_issuer"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer2"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer3"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer4"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer5"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer6"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer7"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer8"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer9"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer10"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("unknown_issuer"));
 
   // Test token remove
   tokens[0]->removeJwt(headers);
@@ -125,7 +140,7 @@ TEST_F(ExtractorTest, TestDefaultHeaderLocationWithValidJWT) {
 
   // Only the issue1 is using default header location.
   EXPECT_EQ(tokens[0]->token(), GoodToken);
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer1"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer1"));
 }
 
 // Test extracting token from the default query parameter: "access_token"
@@ -136,14 +151,14 @@ TEST_F(ExtractorTest, TestDefaultParamLocation) {
 
   // Only the issue1 is using default header location.
   EXPECT_EQ(tokens[0]->token(), "jwt_token");
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer1"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer1"));
 
   // Other issuers are using custom locations
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer2"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer3"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer4"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer5"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("unknown_issuer"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer2"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer3"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer4"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer5"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("unknown_issuer"));
 
   tokens[0]->removeJwt(headers);
 }
@@ -156,14 +171,14 @@ TEST_F(ExtractorTest, TestCustomHeaderToken) {
 
   // Only issuer2 and issuer4 are using "token-header" location
   EXPECT_EQ(tokens[0]->token(), "jwt_token");
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer2"));
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer4"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer2"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer4"));
 
   // Other issuers are not allowed from "token-header"
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer1"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer3"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer5"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("unknown_issuer"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer1"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer3"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer5"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("unknown_issuer"));
 
   // Test token remove
   tokens[0]->removeJwt(headers);
@@ -194,11 +209,11 @@ TEST_F(ExtractorTest, TestPrefixHeaderMatch) {
   EXPECT_EQ(tokens.size(), 2);
 
   // Match issuer 5 with map key as: prefix-header + AAA
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer5"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer5"));
   EXPECT_EQ(tokens[0]->token(), "BBBjwt_token");
 
   // Match issuer 6 with map key as: prefix-header + AAABBB which is after AAA
-  EXPECT_TRUE(tokens[1]->isIssuerSpecified("issuer6"));
+  EXPECT_TRUE(tokens[1]->isIssuerAllowed("issuer6"));
   EXPECT_EQ(tokens[1]->token(), "jwt_token");
 
   // Test token remove
@@ -215,7 +230,7 @@ TEST_F(ExtractorTest, TestPrefixHeaderFlexibleMatch1) {
   EXPECT_EQ(tokens.size(), 1);
 
   // Match issuer 7 with map key as: prefix-header + 'CCCDDD'
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer7"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer7"));
   EXPECT_EQ(tokens[0]->token(), "jwt_token");
 }
 
@@ -226,7 +241,7 @@ TEST_F(ExtractorTest, TestPrefixHeaderFlexibleMatch2) {
   EXPECT_EQ(tokens.size(), 1);
 
   // Match issuer 7 with map key as: prefix-header + AAA
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer7"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer7"));
   EXPECT_EQ(tokens[0]->token(), "and0X3Rva2Vu");
 }
 
@@ -237,11 +252,11 @@ TEST_F(ExtractorTest, TestPrefixHeaderFlexibleMatch3) {
   EXPECT_EQ(tokens.size(), 2);
 
   // Match issuer 8 with map key as: prefix-header + '"CCCDDD"'
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer8"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer8"));
   EXPECT_EQ(tokens[0]->token(), "and0X3Rva2Vu");
 
   // Match issuer 7 with map key as: prefix-header + 'CCCDDD'
-  EXPECT_TRUE(tokens[1]->isIssuerSpecified("issuer7"));
+  EXPECT_TRUE(tokens[1]->isIssuerAllowed("issuer7"));
   EXPECT_EQ(tokens[1]->token(), "and0X3Rva2Vu");
 }
 
@@ -253,15 +268,62 @@ TEST_F(ExtractorTest, TestCustomParamToken) {
 
   // Both issuer3 and issuer4 have specified this custom query location.
   EXPECT_EQ(tokens[0]->token(), "jwt_token");
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer3"));
-  EXPECT_TRUE(tokens[0]->isIssuerSpecified("issuer4"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer3"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer4"));
 
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer1"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer2"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("issuer5"));
-  EXPECT_FALSE(tokens[0]->isIssuerSpecified("unknown_issuer"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer1"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer2"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer5"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("unknown_issuer"));
 
   tokens[0]->removeJwt(headers);
+}
+
+// Test extracting token from a cookie
+TEST_F(ExtractorTest, TestCookieToken) {
+  auto headers = TestRequestHeaderMapImpl{
+      {"cookie", "token-cookie=token-cookie-value; token-cookie-2=token-cookie-value-2"},
+      {"cookie", "token-cookie-3=\"token-cookie-value-3\""}};
+  auto tokens = extractor_->extract(headers);
+  EXPECT_EQ(tokens.size(), 3);
+
+  // only issuer9 has specified "token-cookie" cookie location.
+  EXPECT_EQ(tokens[0]->token(), "token-cookie-value");
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer9"));
+  EXPECT_FALSE(tokens[0]->isIssuerAllowed("issuer10"));
+  tokens[0]->removeJwt(headers);
+
+  // only issuer9 has specified "token-cookie-2" cookie location.
+  EXPECT_EQ(tokens[1]->token(), "token-cookie-value-2");
+  EXPECT_TRUE(tokens[1]->isIssuerAllowed("issuer9"));
+  EXPECT_FALSE(tokens[1]->isIssuerAllowed("issuer10"));
+  tokens[1]->removeJwt(headers);
+
+  // only issuer10 has specified "token-cookie-3" cookie location.
+  EXPECT_EQ(tokens[2]->token(), "token-cookie-value-3");
+  EXPECT_TRUE(tokens[2]->isIssuerAllowed("issuer10"));
+  EXPECT_FALSE(tokens[2]->isIssuerAllowed("issuer9"));
+  tokens[2]->removeJwt(headers);
+}
+
+// Test extracting token from a cookie, but not from default location
+TEST_F(ExtractorTest, TestCookieTokenAndDefault) {
+  setUp(R"(
+providers:
+  provider11:
+    issuer: issuer11
+    from_cookies:
+      - token-cookie
+)");
+  // Headers has token in both cookie and default location.
+  auto headers = TestRequestHeaderMapImpl{{"Authorization", "Bearer jwt_token"},
+                                          {"cookie", "token-cookie=\"token-cookie-value\""}};
+  // token from the default location is not extracted
+  auto tokens = extractor_->extract(headers);
+  EXPECT_EQ(tokens.size(), 1);
+
+  EXPECT_EQ(tokens[0]->token(), "token-cookie-value");
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer11"));
 }
 
 // Test extracting multiple tokens.
@@ -306,6 +368,38 @@ TEST_F(ExtractorTest, TestExtractParam) {
   EXPECT_EQ(tokens.size(), 2);
   EXPECT_EQ(tokens[0]->token(), "token5");
   EXPECT_EQ(tokens[1]->token(), "token3");
+}
+
+TEST_F(ExtractorTest, TestIssuerNotSpecified) {
+  setUp(R"(
+providers:
+  provider1:
+    from_headers:
+      - name: jwt1
+  provider2:
+    issuer: issuer2
+    from_headers:
+      - name: jwt2
+)");
+
+  auto headers = TestRequestHeaderMapImpl{
+      {":path", "/path"},
+      {"jwt1", "token1"},
+      {"jwt2", "token2"},
+  };
+  auto tokens = extractor_->extract(headers);
+  EXPECT_EQ(tokens.size(), 2);
+
+  EXPECT_EQ(tokens[0]->token(), "token1");
+  EXPECT_EQ(tokens[1]->token(), "token2");
+
+  // Token1 allows any issuers since its provider did not specify "issuer"
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("issuer2"));
+  EXPECT_TRUE(tokens[0]->isIssuerAllowed("abc"));
+
+  // Token2 only allows "issuer2"
+  EXPECT_TRUE(tokens[1]->isIssuerAllowed("issuer2"));
+  EXPECT_FALSE(tokens[1]->isIssuerAllowed("abc"));
 }
 
 } // namespace

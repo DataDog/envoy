@@ -1,8 +1,8 @@
 #include "envoy/config/bootstrap/v3/bootstrap.pb.h"
 #include "envoy/config/cluster/v3/cluster.pb.h"
 
-#include "common/network/address_impl.h"
-#include "common/upstream/load_balancer_impl.h"
+#include "source/common/network/address_impl.h"
+#include "source/common/upstream/load_balancer_impl.h"
 
 #include "test/config/utility.h"
 #include "test/integration/clusters/cluster_factory_config.pb.h"
@@ -18,8 +18,7 @@ const int UpstreamIndex = 0;
 class CustomClusterIntegrationTest : public testing::TestWithParam<Network::Address::IpVersion>,
                                      public HttpIntegrationTest {
 public:
-  CustomClusterIntegrationTest()
-      : HttpIntegrationTest(Http::CodecClient::Type::HTTP1, GetParam(), realTime()) {}
+  CustomClusterIntegrationTest() : HttpIntegrationTest(Http::CodecType::HTTP1, GetParam()) {}
 
   void initialize() override {
     setUpstreamCount(1);
@@ -69,10 +68,10 @@ TEST_P(CustomClusterIntegrationTest, TestCustomConfig) {
   initialize();
 
   // Verify the cluster is correctly setup with the custom priority
-  const auto& cluster_map = test_server_->server().clusterManager().clusters();
-  EXPECT_EQ(1, cluster_map.size());
-  EXPECT_EQ(1, cluster_map.count("cluster_0"));
-  const auto& cluster_ref = cluster_map.find("cluster_0")->second;
+  const auto& cluster_maps = test_server_->server().clusterManager().clusters();
+  EXPECT_EQ(1, cluster_maps.active_clusters_.size());
+  EXPECT_EQ(1, cluster_maps.active_clusters_.count("cluster_0"));
+  const auto& cluster_ref = cluster_maps.active_clusters_.find("cluster_0")->second;
   const auto& hostset_per_priority = cluster_ref.get().prioritySet().hostSetsPerPriority();
   EXPECT_EQ(11, hostset_per_priority.size());
   const Envoy::Upstream::HostSetPtr& host_set = hostset_per_priority[10];

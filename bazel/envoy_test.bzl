@@ -1,16 +1,18 @@
-load("@rules_python//python:defs.bzl", "py_binary")
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
-
 # DO NOT LOAD THIS FILE. Load envoy_build_system.bzl instead.
 # Envoy test targets. This includes both test library and test binary targets.
-load("@bazel_tools//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
+load("@rules_python//python:defs.bzl", "py_binary", "py_test")
+load("@rules_fuzzing//fuzzing:cc_defs.bzl", "fuzzing_decoration")
 load(":envoy_binary.bzl", "envoy_cc_binary")
 load(":envoy_library.bzl", "tcmalloc_external_deps")
+load(":envoy_pch.bzl", "envoy_pch_copts")
 load(
     ":envoy_internal.bzl",
     "envoy_copts",
+    "envoy_dbg_linkopts",
+    "envoy_exported_symbols_input",
     "envoy_external_dep_path",
     "envoy_linkstatic",
+    "envoy_select_exported_symbols",
     "envoy_select_force_libcpp",
     "envoy_stdlib_deps",
     "tcmalloc_external_dep",
@@ -30,19 +32,26 @@ def _envoy_cc_test_infrastructure_library(
         include_prefix = None,
         copts = [],
         alwayslink = 1,
+        disable_pch = False,
         **kargs):
     # Add implicit tcmalloc external dependency(if available) in order to enable CPU and heap profiling in tests.
     deps += tcmalloc_external_deps(repository)
-    cc_library(
+    extra_deps = []
+    pch_copts = []
+    if disable_pch:
+        extra_deps = [envoy_external_dep_path("googletest")]
+    else:
+        extra_deps = [repository + "//test:test_pch"]
+        pch_copts = envoy_pch_copts(repository, "//test:test_pch")
+
+    native.cc_library(
         name = name,
         srcs = srcs,
         hdrs = hdrs,
         data = data,
-        copts = envoy_copts(repository, test = True) + copts,
+        copts = envoy_copts(repository, test = True) + copts + pch_copts,
         testonly = 1,
-        deps = deps + [envoy_external_dep_path(dep) for dep in external_deps] + [
-            envoy_external_dep_path("googletest"),
-        ],
+        deps = deps + [envoy_external_dep_path(dep) for dep in external_deps] + extra_deps,
         tags = tags,
         include_prefix = include_prefix,
         alwayslink = alwayslink,
@@ -53,11 +62,7 @@ def _envoy_cc_test_infrastructure_library(
 # Compute the test linkopts based on various options.
 def _envoy_test_linkopts():
     return select({
-        "@envoy//bazel:apple": [
-            # See note here: https://luajit.org/install.html
-            "-pagezero_size 10000",
-            "-image_base 100000000",
-        ],
+        "@envoy//bazel:apple": [],
         "@envoy//bazel:windows_x86_64": [
             "-DEFAULTLIB:ws2_32.lib",
             "-DEFAULTLIB:iphlpapi.lib",
@@ -67,7 +72,7 @@ def _envoy_test_linkopts():
         # TODO(mattklein123): It's not great that we universally link against the following libs.
         # In particular, -latomic and -lrt are not needed on all platforms. Make this more granular.
         "//conditions:default": ["-pthread", "-lrt", "-ldl"],
-    }) + envoy_select_force_libcpp([], ["-lstdc++fs", "-latomic"])
+    }) + envoy_select_force_libcpp([], ["-lstdc++fs", "-latomic"]) + envoy_dbg_linkopts() + envoy_select_exported_symbols(["-Wl,-E"])
 
 # Envoy C++ fuzz test targets. These are not included in coverage runs.
 def envoy_cc_fuzz_test(
@@ -80,23 +85,14 @@ def envoy_cc_fuzz_test(
         tags = [],
         **kwargs):
     if not (corpus.startswith("//") or corpus.startswith(":") or corpus.startswith("@")):
-        corpus_name = name + "_corpus"
-        corpus = native.glob([corpus + "/**"])
+        corpus_name = name + "_corpus_files"
         native.filegroup(
             name = corpus_name,
-            srcs = corpus,
+            srcs = native.glob([corpus + "/**"]),
         )
     else:
         corpus_name = corpus
-    tar_src = [corpus_name]
-    if dictionaries:
-        tar_src += dictionaries
-    pkg_tar(
-        name = name + "_corpus_tar",
-        srcs = tar_src,
-        testonly = 1,
-    )
-    fuzz_copts = ["-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION"]
+
     test_lib_name = name + "_lib"
     envoy_cc_test_library(
         name = test_lib_name,
@@ -108,9 +104,11 @@ def envoy_cc_fuzz_test(
         tags = tags,
         **kwargs
     )
-    cc_test(
+
+    native.cc_test(
         name = name,
-        copts = fuzz_copts + envoy_copts("@envoy", test = True),
+        copts = envoy_copts("@envoy", test = True),
+        additional_linker_inputs = envoy_exported_symbols_input(),
         linkopts = _envoy_test_linkopts() + select({
             "@envoy//bazel:libfuzzer": ["-fsanitize=fuzzer"],
             "//conditions:default": [],
@@ -126,30 +124,22 @@ def envoy_cc_fuzz_test(
         deps = select({
             "@envoy//bazel:apple": [repository + "//test:dummy_main"],
             "@envoy//bazel:windows_x86_64": [repository + "//test:dummy_main"],
-            "@envoy//bazel:libfuzzer": [
-                ":" + test_lib_name,
-            ],
             "//conditions:default": [
                 ":" + test_lib_name,
-                repository + "//test/fuzz:main",
+                "@envoy//bazel:fuzzing_engine",
             ],
         }),
         size = size,
         tags = ["fuzz_target"] + tags,
     )
 
-    # This target exists only for
-    # https://github.com/google/oss-fuzz/blob/master/projects/envoy/build.sh. It won't yield
-    # anything useful on its own, as it expects to be run in an environment where the linker options
-    # provide a path to FuzzingEngine.
-    cc_binary(
-        name = name + "_driverless",
-        copts = fuzz_copts + envoy_copts("@envoy", test = True),
-        linkopts = ["-lFuzzingEngine"] + _envoy_test_linkopts(),
-        linkstatic = 1,
-        testonly = 1,
-        deps = [":" + test_lib_name],
-        tags = ["manual"] + tags,
+    fuzzing_decoration(
+        name = name,
+        raw_binary = name,
+        engine = "@envoy//bazel:fuzzing_engine",
+        corpus = [corpus_name],
+        dicts = dictionaries,
+        define_regression_test = False,
     )
 
 # Envoy C++ test targets should be specified with this function.
@@ -164,24 +154,32 @@ def envoy_cc_test(
         tags = [],
         args = [],
         copts = [],
+        condition = None,
         shard_count = None,
         coverage = True,
         local = False,
         size = "medium",
-        flaky = False):
+        flaky = False,
+        env = {},
+        exec_properties = {}):
     coverage_tags = tags + ([] if coverage else ["nocoverage"])
-    cc_test(
+
+    native.cc_test(
         name = name,
         srcs = srcs,
         data = data,
-        copts = envoy_copts(repository, test = True) + copts,
+        copts = envoy_copts(repository, test = True) + copts + envoy_pch_copts(repository, "//test:test_pch"),
+        additional_linker_inputs = envoy_exported_symbols_input(),
         linkopts = _envoy_test_linkopts(),
         linkstatic = envoy_linkstatic(),
         malloc = tcmalloc_external_dep(repository),
         deps = envoy_stdlib_deps() + deps + [envoy_external_dep_path(dep) for dep in external_deps + ["googletest"]] + [
             repository + "//test:main",
             repository + "//test/test_common:test_version_linkstamp",
-        ],
+        ] + select({
+            repository + "//bazel:clang_pch_build": [repository + "//test:test_pch"],
+            "//conditions:default": [],
+        }),
         # from https://github.com/google/googletest/blob/6e1970e2376c14bf658eb88f655a054030353f9f/googlemock/src/gmock.cc#L51
         # 2 - by default, mocks act as StrictMocks.
         args = args + ["--gmock_default_mock_behavior=2"],
@@ -190,6 +188,8 @@ def envoy_cc_test(
         shard_count = shard_count,
         size = size,
         flaky = flaky,
+        env = env,
+        exec_properties = exec_properties,
     )
 
 # Envoy C++ test related libraries (that want gtest, gmock) should be specified
@@ -207,10 +207,7 @@ def envoy_cc_test_library(
         copts = [],
         alwayslink = 1,
         **kargs):
-    deps = deps + [
-        repository + "//test/test_common:printers_includes",
-    ]
-
+    disable_pch = kargs.pop("disable_pch", True)
     _envoy_cc_test_infrastructure_library(
         name,
         srcs,
@@ -224,6 +221,7 @@ def envoy_cc_test_library(
         copts,
         visibility = ["//visibility:public"],
         alwayslink = alwayslink,
+        disable_pch = disable_pch,
         **kargs
     )
 
@@ -266,10 +264,11 @@ def envoy_benchmark_test(
         benchmark_binary,
         data = [],
         tags = [],
+        repository = "",
         **kargs):
     native.sh_test(
         name = name,
-        srcs = ["//bazel:test_for_benchmark_wrapper.sh"],
+        srcs = [repository + "//bazel:test_for_benchmark_wrapper.sh"],
         data = [":" + benchmark_binary] + data,
         args = ["%s/%s" % (native.package_name(), benchmark_binary)],
         tags = tags + ["nocoverage"],
@@ -288,9 +287,21 @@ def envoy_py_test_binary(
         **kargs
     )
 
+# Envoy py_tests should be specified with this function.
+def envoy_py_test(
+        name,
+        external_deps = [],
+        deps = [],
+        **kargs):
+    py_test(
+        name = name,
+        deps = deps + [envoy_external_dep_path(dep) for dep in external_deps],
+        **kargs
+    )
+
 # Envoy C++ mock targets should be specified with this function.
 def envoy_cc_mock(name, **kargs):
-    envoy_cc_test_library(name = name, **kargs)
+    envoy_cc_test_library(name = name, disable_pch = True, **kargs)
 
 # Envoy shell tests that need to be included in coverage run should be specified with this function.
 def envoy_sh_test(

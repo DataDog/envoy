@@ -8,16 +8,15 @@
 #include "envoy/stats/stats_macros.h"
 #include "envoy/stats/timespan.h"
 
-#include "common/common/logger.h"
-#include "common/common/utility.h"
-#include "common/stats/timespan_impl.h"
-
-#include "extensions/filters/network/common/redis/client_impl.h"
-#include "extensions/filters/network/common/redis/fault_impl.h"
-#include "extensions/filters/network/common/redis/utility.h"
-#include "extensions/filters/network/redis_proxy/command_splitter.h"
-#include "extensions/filters/network/redis_proxy/conn_pool_impl.h"
-#include "extensions/filters/network/redis_proxy/router.h"
+#include "source/common/common/logger.h"
+#include "source/common/common/utility.h"
+#include "source/common/stats/timespan_impl.h"
+#include "source/extensions/filters/network/common/redis/client_impl.h"
+#include "source/extensions/filters/network/common/redis/fault_impl.h"
+#include "source/extensions/filters/network/common/redis/utility.h"
+#include "source/extensions/filters/network/redis_proxy/command_splitter.h"
+#include "source/extensions/filters/network/redis_proxy/conn_pool_impl.h"
+#include "source/extensions/filters/network/redis_proxy/router.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -70,7 +69,7 @@ protected:
   Router& router_;
 };
 
-class SplitRequestBase : public SplitRequest {
+class SplitRequestBase : public SplitRequest, public Logger::Loggable<Logger::Id::redis> {
 protected:
   static void onWrongNumberOfArguments(SplitCallbacks& callbacks,
                                        const Common::Redis::RespValue& request);
@@ -147,11 +146,13 @@ public:
 
   // SplitCallbacks
   bool connectionAllowed() override { return callbacks_.connectionAllowed(); }
+  void onQuit() override { callbacks_.onQuit(); }
   void onAuth(const std::string& password) override { callbacks_.onAuth(password); }
   void onAuth(const std::string& username, const std::string& password) override {
     callbacks_.onAuth(username, password);
   }
   void onResponse(Common::Redis::RespValuePtr&& response) override;
+  Common::Redis::Client::Transaction& transaction() override { return callbacks_.transaction(); }
 
   // RedisProxy::CommandSplitter::SplitRequest
   void cancel() override;
@@ -194,6 +195,23 @@ public:
 private:
   EvalRequest(SplitCallbacks& callbacks, CommandStats& command_stats, TimeSource& time_source,
               bool delay_command_latency)
+      : SingleServerRequest(callbacks, command_stats, time_source, delay_command_latency) {}
+};
+
+/**
+ * TransactionRequest handles commands that are part of a Redis transaction.
+ * This includes MULTI, EXEC, DISCARD, and also all the commands that are
+ * part of the transaction.
+ */
+class TransactionRequest : public SingleServerRequest {
+public:
+  static SplitRequestPtr create(Router& router, Common::Redis::RespValuePtr&& incoming_request,
+                                SplitCallbacks& callbacks, CommandStats& command_stats,
+                                TimeSource& time_source, bool delay_command_latency);
+
+private:
+  TransactionRequest(SplitCallbacks& callbacks, CommandStats& command_stats,
+                     TimeSource& time_source, bool delay_command_latency)
       : SingleServerRequest(callbacks, command_stats, time_source, delay_command_latency) {}
 };
 
@@ -244,7 +262,7 @@ protected:
  * MGETRequest takes each key from the command and sends a GET for each to the appropriate Redis
  * server. The response contains the result from each command.
  */
-class MGETRequest : public FragmentedRequest, Logger::Loggable<Logger::Id::redis> {
+class MGETRequest : public FragmentedRequest {
 public:
   static SplitRequestPtr create(Router& router, Common::Redis::RespValuePtr&& incoming_request,
                                 SplitCallbacks& callbacks, CommandStats& command_stats,
@@ -265,7 +283,7 @@ private:
  * integer) is summed and returned to the user. If there is any error or failure in processing the
  * fragmented commands, an error will be returned.
  */
-class SplitKeysSumResultRequest : public FragmentedRequest, Logger::Loggable<Logger::Id::redis> {
+class SplitKeysSumResultRequest : public FragmentedRequest {
 public:
   static SplitRequestPtr create(Router& router, Common::Redis::RespValuePtr&& incoming_request,
                                 SplitCallbacks& callbacks, CommandStats& command_stats,
@@ -287,7 +305,7 @@ private:
  * appropriate Redis server. The response is an OK if all commands succeeded or an ERR if any
  * failed.
  */
-class MSETRequest : public FragmentedRequest, Logger::Loggable<Logger::Id::redis> {
+class MSETRequest : public FragmentedRequest {
 public:
   static SplitRequestPtr create(Router& router, Common::Redis::RespValuePtr&& incoming_request,
                                 SplitCallbacks& callbacks, CommandStats& command_stats,
@@ -362,6 +380,7 @@ private:
   CommandHandlerFactory<MGETRequest> mget_handler_;
   CommandHandlerFactory<MSETRequest> mset_handler_;
   CommandHandlerFactory<SplitKeysSumResultRequest> split_keys_sum_result_handler_;
+  CommandHandlerFactory<TransactionRequest> transaction_handler_;
   TrieLookupTable<HandlerDataPtr> handler_lookup_table_;
   InstanceStats stats_;
   TimeSource& time_source_;

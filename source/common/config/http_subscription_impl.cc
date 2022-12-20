@@ -1,19 +1,18 @@
-#include "common/config/http_subscription_impl.h"
+#include "source/common/config/http_subscription_impl.h"
 
 #include <memory>
 
 #include "envoy/service/discovery/v3/discovery.pb.h"
 
-#include "common/buffer/buffer_impl.h"
-#include "common/common/assert.h"
-#include "common/common/macros.h"
-#include "common/common/utility.h"
-#include "common/config/decoded_resource_impl.h"
-#include "common/config/utility.h"
-#include "common/config/version_converter.h"
-#include "common/http/headers.h"
-#include "common/protobuf/protobuf.h"
-#include "common/protobuf/utility.h"
+#include "source/common/buffer/buffer_impl.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/macros.h"
+#include "source/common/common/utility.h"
+#include "source/common/config/decoded_resource_impl.h"
+#include "source/common/config/utility.h"
+#include "source/common/http/headers.h"
+#include "source/common/protobuf/protobuf.h"
+#include "source/common/protobuf/utility.h"
 
 #include "google/api/annotations.pb.h"
 
@@ -25,15 +24,15 @@ HttpSubscriptionImpl::HttpSubscriptionImpl(
     const std::string& remote_cluster_name, Event::Dispatcher& dispatcher,
     Random::RandomGenerator& random, std::chrono::milliseconds refresh_interval,
     std::chrono::milliseconds request_timeout, const Protobuf::MethodDescriptor& service_method,
-    absl::string_view type_url, envoy::config::core::v3::ApiVersion transport_api_version,
-    SubscriptionCallbacks& callbacks, OpaqueResourceDecoder& resource_decoder,
-    SubscriptionStats stats, std::chrono::milliseconds init_fetch_timeout,
+    absl::string_view type_url, SubscriptionCallbacks& callbacks,
+    OpaqueResourceDecoderSharedPtr resource_decoder, SubscriptionStats stats,
+    std::chrono::milliseconds init_fetch_timeout,
     ProtobufMessage::ValidationVisitor& validation_visitor)
     : Http::RestApiFetcher(cm, remote_cluster_name, dispatcher, random, refresh_interval,
                            request_timeout),
       callbacks_(callbacks), resource_decoder_(resource_decoder), stats_(stats),
       dispatcher_(dispatcher), init_fetch_timeout_(init_fetch_timeout),
-      validation_visitor_(validation_visitor), transport_api_version_(transport_api_version) {
+      validation_visitor_(validation_visitor) {
   request_.mutable_node()->CopyFrom(local_info.node());
   request_.set_type_url(std::string(type_url));
   ASSERT(service_method.options().HasExtension(google::api::http));
@@ -43,7 +42,7 @@ HttpSubscriptionImpl::HttpSubscriptionImpl(
 }
 
 // Config::Subscription
-void HttpSubscriptionImpl::start(const std::set<std::string>& resource_names, const bool) {
+void HttpSubscriptionImpl::start(const absl::flat_hash_set<std::string>& resource_names) {
   if (init_fetch_timeout_.count() > 0) {
     init_fetch_timeout_timer_ = dispatcher_.createTimer([this]() -> void {
       handleFailure(Config::ConfigUpdateFailureReason::FetchTimedout, nullptr);
@@ -53,14 +52,18 @@ void HttpSubscriptionImpl::start(const std::set<std::string>& resource_names, co
 
   Protobuf::RepeatedPtrField<std::string> resources_vector(resource_names.begin(),
                                                            resource_names.end());
+  // Sort to provide stable wire ordering.
+  std::sort(resources_vector.begin(), resources_vector.end());
   request_.mutable_resource_names()->Swap(&resources_vector);
   initialize();
 }
 
 void HttpSubscriptionImpl::updateResourceInterest(
-    const std::set<std::string>& update_to_these_names) {
+    const absl::flat_hash_set<std::string>& update_to_these_names) {
   Protobuf::RepeatedPtrField<std::string> resources_vector(update_to_these_names.begin(),
                                                            update_to_these_names.end());
+  // Sort to provide stable wire ordering.
+  std::sort(resources_vector.begin(), resources_vector.end());
   request_.mutable_resource_names()->Swap(&resources_vector);
 }
 
@@ -70,7 +73,7 @@ void HttpSubscriptionImpl::createRequest(Http::RequestMessage& request) {
   stats_.update_attempt_.inc();
   request.headers().setReferenceMethod(Http::Headers::get().MethodValues.Post);
   request.headers().setPath(path_);
-  request.body().add(VersionConverter::getJsonStringFromMessage(request_, transport_api_version_));
+  request.body().add(MessageUtil::getJsonStringFromMessageOrDie(request_));
   request.headers().setReferenceContentType(Http::Headers::get().ContentTypeValues.Json);
   request.headers().setContentLength(request.body().length());
 }
@@ -78,22 +81,26 @@ void HttpSubscriptionImpl::createRequest(Http::RequestMessage& request) {
 void HttpSubscriptionImpl::parseResponse(const Http::ResponseMessage& response) {
   disableInitFetchTimeoutTimer();
   envoy::service::discovery::v3::DiscoveryResponse message;
-  try {
+  TRY_ASSERT_MAIN_THREAD {
     MessageUtil::loadFromJson(response.bodyAsString(), message, validation_visitor_);
-  } catch (const EnvoyException& e) {
+  }
+  END_TRY
+  catch (const EnvoyException& e) {
     handleFailure(Config::ConfigUpdateFailureReason::UpdateRejected, &e);
     return;
   }
-  try {
+  TRY_ASSERT_MAIN_THREAD {
     const auto decoded_resources =
-        DecodedResourcesWrapper(resource_decoder_, message.resources(), message.version_info());
+        DecodedResourcesWrapper(*resource_decoder_, message.resources(), message.version_info());
     callbacks_.onConfigUpdate(decoded_resources.refvec_, message.version_info());
     request_.set_version_info(message.version_info());
     stats_.update_time_.set(DateUtil::nowToMilliseconds(dispatcher_.timeSource()));
     stats_.version_.set(HashUtil::xxHash64(request_.version_info()));
     stats_.version_text_.set(request_.version_info());
     stats_.update_success_.inc();
-  } catch (const EnvoyException& e) {
+  }
+  END_TRY
+  catch (const EnvoyException& e) {
     handleFailure(Config::ConfigUpdateFailureReason::UpdateRejected, &e);
   }
 }

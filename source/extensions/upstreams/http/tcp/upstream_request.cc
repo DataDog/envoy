@@ -1,20 +1,19 @@
-#include "extensions/upstreams/http/tcp/upstream_request.h"
+#include "source/extensions/upstreams/http/tcp/upstream_request.h"
 
 #include <cstdint>
 #include <memory>
 
 #include "envoy/upstream/upstream.h"
 
-#include "common/common/assert.h"
-#include "common/common/utility.h"
-#include "common/http/codes.h"
-#include "common/http/header_map_impl.h"
-#include "common/http/headers.h"
-#include "common/http/message_impl.h"
-#include "common/network/transport_socket_options_impl.h"
-#include "common/router/router.h"
-
-#include "extensions/common/proxy_protocol/proxy_protocol_header.h"
+#include "source/common/common/assert.h"
+#include "source/common/common/utility.h"
+#include "source/common/http/codes.h"
+#include "source/common/http/header_map_impl.h"
+#include "source/common/http/headers.h"
+#include "source/common/http/message_impl.h"
+#include "source/common/network/transport_socket_options_impl.h"
+#include "source/common/router/router.h"
+#include "source/extensions/common/proxy_protocol/proxy_protocol_header.h"
 
 namespace Envoy {
 namespace Extensions {
@@ -28,8 +27,8 @@ void TcpConnPool::onPoolReady(Envoy::Tcp::ConnectionPool::ConnectionDataPtr&& co
   Network::Connection& latched_conn = conn_data->connection();
   auto upstream =
       std::make_unique<TcpUpstream>(&callbacks_->upstreamToDownstream(), std::move(conn_data));
-  callbacks_->onPoolReady(std::move(upstream), host, latched_conn.localAddress(),
-                          latched_conn.streamInfo());
+  callbacks_->onPoolReady(std::move(upstream), host, latched_conn.connectionInfoProvider(),
+                          latched_conn.streamInfo(), {});
 }
 
 TcpUpstream::TcpUpstream(Router::UpstreamToDownstream* upstream_request,
@@ -47,16 +46,19 @@ Envoy::Http::Status TcpUpstream::encodeHeaders(const Envoy::Http::RequestHeaderM
                                                bool end_stream) {
   // Headers should only happen once, so use this opportunity to add the proxy
   // proto header, if configured.
-  ASSERT(upstream_request_->routeEntry().connectConfig().has_value());
-  Buffer::OwnedImpl data;
-  auto& connect_config = upstream_request_->routeEntry().connectConfig().value();
-  if (connect_config.has_proxy_protocol_config()) {
-    Extensions::Common::ProxyProtocol::generateProxyProtoHeader(
-        connect_config.proxy_protocol_config(), upstream_request_->connection(), data);
-  }
+  const Router::RouteEntry* route_entry = upstream_request_->route().routeEntry();
+  ASSERT(route_entry != nullptr);
+  if (route_entry->connectConfig().has_value()) {
+    Buffer::OwnedImpl data;
+    auto& connect_config = route_entry->connectConfig().value();
+    if (connect_config.has_proxy_protocol_config() && upstream_request_->connection().has_value()) {
+      Extensions::Common::ProxyProtocol::generateProxyProtoHeader(
+          connect_config.proxy_protocol_config(), *upstream_request_->connection(), data);
+    }
 
-  if (data.length() != 0 || end_stream) {
-    upstream_conn_data_->connection().write(data, end_stream);
+    if (data.length() != 0 || end_stream) {
+      upstream_conn_data_->connection().write(data, end_stream);
+    }
   }
 
   // TcpUpstream::encodeHeaders is called after the UpstreamRequest is fully initialized. Also use
@@ -90,7 +92,9 @@ void TcpUpstream::onUpstreamData(Buffer::Instance& data, bool end_stream) {
 }
 
 void TcpUpstream::onEvent(Network::ConnectionEvent event) {
-  if (event != Network::ConnectionEvent::Connected && upstream_request_) {
+  if ((event == Network::ConnectionEvent::LocalClose ||
+       event == Network::ConnectionEvent::RemoteClose) &&
+      upstream_request_) {
     upstream_request_->onResetStream(Envoy::Http::StreamResetReason::ConnectionTermination, "");
   }
 }

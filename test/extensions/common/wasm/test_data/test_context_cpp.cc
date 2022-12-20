@@ -8,7 +8,7 @@
 #include "proxy_wasm_intrinsics.h"
 #include "source/extensions/common/wasm/ext/envoy_proxy_wasm_api.h"
 #else
-#include "extensions/common/wasm/ext/envoy_null_plugin.h"
+#include "source/extensions/common/wasm/ext/envoy_null_plugin.h"
 #endif
 
 START_WASM_PLUGIN(CommonWasmTestContextCpp)
@@ -58,7 +58,7 @@ bool TestRootContext::onDone() {
 
 // Null VM fails on nullptr.
 void TestRootContext::onTick() {
-  if (envoy_resolve_dns(0, 1, &dns_token_) != WasmResult::InvalidMemoryAccess) {
+  if (envoy_resolve_dns(nullptr, 1, &dns_token_) != WasmResult::InvalidMemoryAccess) {
     logInfo("resolve_dns should report invalid memory access");
   }
   if (envoy_resolve_dns("example.com", sizeof("example.com") - 1, nullptr) !=
@@ -78,5 +78,43 @@ void TestRootContext::onQueueReady(uint32_t) {
     logInfo("resolve_dns should report invalid memory access");
   }
 }
+
+class DupReplyContext : public Context {
+public:
+  explicit DupReplyContext(uint32_t id, RootContext* root) : Context(id, root) {}
+  FilterDataStatus onRequestBody(size_t body_buffer_length, bool end_of_stream) override;
+
+private:
+  EnvoyRootContext* root() { return static_cast<EnvoyRootContext*>(Context::root()); }
+};
+
+FilterDataStatus DupReplyContext::onRequestBody(size_t, bool) {
+  sendLocalResponse(200, "ok", "body", {});
+  sendLocalResponse(200, "not send", "body", {});
+  return FilterDataStatus::Continue;
+}
+
+class PanicReplyContext : public Context {
+public:
+  explicit PanicReplyContext(uint32_t id, RootContext* root) : Context(id, root) {}
+  FilterDataStatus onRequestBody(size_t body_buffer_length, bool end_of_stream) override;
+
+private:
+  EnvoyRootContext* root() { return static_cast<EnvoyRootContext*>(Context::root()); }
+};
+
+FilterDataStatus PanicReplyContext::onRequestBody(size_t, bool) {
+  sendLocalResponse(200, "not send", "body", {});
+  int* badptr = nullptr;
+  *badptr = 0;
+  return FilterDataStatus::Continue;
+}
+
+static RegisterContextFactory register_DupReplyContext(CONTEXT_FACTORY(DupReplyContext),
+                                                       ROOT_FACTORY(EnvoyRootContext),
+                                                       "send local reply twice");
+static RegisterContextFactory register_PanicReplyContext(CONTEXT_FACTORY(PanicReplyContext),
+                                                         ROOT_FACTORY(EnvoyRootContext),
+                                                         "panic after sending local reply");
 
 END_WASM_PLUGIN

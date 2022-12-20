@@ -2,17 +2,14 @@
 
 #include <regex>
 
-#include "common/common/logger.h"
-#include "common/common/logger_delegates.h"
-#include "common/common/thread.h"
-#include "common/event/libevent.h"
-#include "common/runtime/runtime_features.h"
+#include "source/common/common/logger.h"
+#include "source/common/common/logger_delegates.h"
+#include "source/common/common/thread.h"
+#include "source/common/event/libevent.h"
+#include "source/common/runtime/runtime_features.h"
+#include "source/exe/process_wide.h"
+#include "source/server/backtrace.h"
 
-#include "exe/process_wide.h"
-
-#include "server/backtrace.h"
-
-#include "test/common/runtime/utility.h"
 #include "test/mocks/access_log/mocks.h"
 #include "test/test_common/environment.h"
 #include "test/test_listener.h"
@@ -48,24 +45,19 @@ public:
       : runtime_override_(runtime_override), disable_(disable) {}
 
   // On each test start, edit RuntimeFeaturesDefaults with our custom runtime defaults.
+  // The defaults will be restored by TestListener::OnTestEnd.
   void OnTestStart(const ::testing::TestInfo&) override {
     if (!runtime_override_.empty()) {
-      bool reset = disable_ ? Runtime::RuntimeFeaturesPeer::disableFeature(runtime_override_)
-                            : Runtime::RuntimeFeaturesPeer::enableFeature(runtime_override_);
-      if (!reset) {
-        // If the entry was already in the hash map, don't remove it OnTestEnd.
+      bool old_value = Runtime::runtimeFeatureEnabled(runtime_override_);
+      if (disable_ != old_value) {
+        // If the entry was already in the hash map, don't invert it OnTestEnd.
         runtime_override_.clear();
+      } else {
+        Runtime::maybeSetRuntimeGuard(runtime_override_, !disable_);
       }
     }
   }
 
-  // As each test ends, clean up the RuntimeFeaturesDefaults state.
-  void OnTestEnd(const ::testing::TestInfo&) override {
-    if (!runtime_override_.empty()) {
-      disable_ ? Runtime::RuntimeFeaturesPeer::enableFeature(runtime_override_)
-               : Runtime::RuntimeFeaturesPeer::disableFeature(runtime_override_);
-    }
-  }
   std::string runtime_override_;
   // This marks whether the runtime feature was enabled by default and needs to be overridden to
   // false.
@@ -78,7 +70,7 @@ int TestRunner::RunTests(int argc, char** argv) {
   ::testing::InitGoogleMock(&argc, argv);
   // We hold on to process_wide to provide RAII cleanup of process-wide
   // state.
-  ProcessWide process_wide;
+  ProcessWide process_wide(false);
   // Add a test-listener so we can call a hook where we can do a quiescence
   // check after each method. See
   // https://github.com/google/googletest/blob/master/googletest/docs/advanced.md
@@ -152,7 +144,20 @@ int TestRunner::RunTests(int argc, char** argv) {
     file_logger = std::make_unique<Logger::FileSinkDelegate>(
         TestEnvironment::getOptions().logPath(), access_log_manager, Logger::Registry::getSink());
   }
+
+  // Reset all ENVOY_BUG counters.
+  Envoy::Assert::resetEnvoyBugCountersForTest();
+
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+  // Fuzz tests may run Envoy tests in fuzzing mode to generate corpora. In this case, we do not
+  // want to fail building the fuzz test because of a failed test run, which can happen when testing
+  // functionality in fuzzing test mode. Dependencies (like RE2) change behavior when in fuzzing
+  // mode, so we do not want to rely on a behavior test when generating a corpus.
+  (void)RUN_ALL_TESTS();
+  return 0;
+#else
   return RUN_ALL_TESTS();
+#endif
 }
 
 } // namespace Envoy

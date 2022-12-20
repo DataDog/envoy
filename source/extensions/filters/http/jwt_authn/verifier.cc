@@ -1,4 +1,4 @@
-#include "extensions/filters/http/jwt_authn/verifier.h"
+#include "source/extensions/filters/http/jwt_authn/verifier.h"
 
 #include "envoy/extensions/filters/http/jwt_authn/v3/config.pb.h"
 
@@ -26,20 +26,20 @@ struct CompletionState {
   // number of completed inner verifier for an any/all verifier.
   std::size_t number_completed_children_{0};
   // A valid error for a RequireAny
-  Status any_valid_error_{Status::Ok};
+  Status status_;
 };
 
 class ContextImpl : public Verifier::Context {
 public:
   ContextImpl(Http::RequestHeaderMap& headers, Tracing::Span& parent_span,
-              Verifier::Callbacks* callback)
+              Verifier::Callbacks& callback)
       : headers_(headers), parent_span_(parent_span), callback_(callback) {}
 
   Http::RequestHeaderMap& headers() const override { return headers_; }
 
   Tracing::Span& parentSpan() const override { return parent_span_; }
 
-  Verifier::Callbacks* callback() const override { return callback_; }
+  Verifier::Callbacks* callback() const override { return &callback_; }
 
   void cancel() override {
     for (const auto& it : auths_) {
@@ -55,24 +55,24 @@ public:
   // Stores an authenticator object for this request.
   void storeAuth(AuthenticatorPtr&& auth) { auths_.emplace_back(std::move(auth)); }
 
-  // Add a pair of (name, payload), called by Authenticator
-  void addPayload(const std::string& name, const ProtobufWkt::Struct& payload) {
-    *(*payload_.mutable_fields())[name].mutable_struct_value() = payload;
+  // Add a pair of (name, payload), called by Authenticator. It can be either JWT header or payload.
+  void addExtractedData(const std::string& name, const ProtobufWkt::Struct& extracted_data) {
+    *(*extracted_data_.mutable_fields())[name].mutable_struct_value() = extracted_data;
   }
 
-  void setPayload() {
-    if (!payload_.fields().empty()) {
-      callback_->setPayload(payload_);
+  void setExtractedData() {
+    if (!extracted_data_.fields().empty()) {
+      callback_.setExtractedData(extracted_data_);
     }
   }
 
 private:
   Http::RequestHeaderMap& headers_;
   Tracing::Span& parent_span_;
-  Verifier::Callbacks* callback_;
+  Verifier::Callbacks& callback_;
   absl::node_hash_map<const Verifier*, CompletionState> completion_states_;
   std::vector<AuthenticatorPtr> auths_;
-  ProtobufWkt::Struct payload_;
+  ProtobufWkt::Struct extracted_data_;
 };
 
 // base verifier for provider_name, provider_and_audiences, and allow_missing_or_failed.
@@ -82,11 +82,14 @@ public:
 
   void completeWithStatus(Status status, ContextImpl& context) const {
     if (parent_ != nullptr) {
+      auto& completion_state = context.getCompletionState(this);
+      completion_state.status_ = status;
       return parent_->onComplete(status, context);
     }
 
     if (Status::Ok == status) {
-      context.setPayload();
+      // We only set the extracted data to context when the JWT is verified.
+      context.setExtractedData();
     }
     context.callback()->onComplete(status);
     context.cancel();
@@ -113,20 +116,18 @@ public:
   ProviderVerifierImpl(const std::string& provider_name, const AuthFactory& factory,
                        const JwtProvider& provider, const BaseVerifierImpl* parent)
       : BaseVerifierImpl(parent), auth_factory_(factory), extractor_(Extractor::create(provider)),
-        provider_name_(absl::make_optional<std::string>(provider_name)) {}
+        provider_name_(provider_name) {}
 
   void verify(ContextSharedPtr context) const override {
     auto& ctximpl = static_cast<ContextImpl&>(*context);
     auto auth = auth_factory_.create(getAudienceChecker(), provider_name_, false, false);
-    extractor_->sanitizePayloadHeaders(ctximpl.headers());
+    extractor_->sanitizeHeaders(ctximpl.headers());
     auth->verify(
         ctximpl.headers(), ctximpl.parentSpan(), extractor_->extract(ctximpl.headers()),
-        [&ctximpl](const std::string& name, const ProtobufWkt::Struct& payload) {
-          ctximpl.addPayload(name, payload);
+        [&ctximpl](const std::string& name, const ProtobufWkt::Struct& extracted_data) {
+          ctximpl.addExtractedData(name, extracted_data);
         },
-        [this, context](const Status& status) {
-          onComplete(status, static_cast<ContextImpl&>(*context));
-        });
+        [this, &ctximpl](const Status& status) { onComplete(status, ctximpl); });
     if (!ctximpl.getCompletionState(this).is_completed_) {
       ctximpl.storeAuth(std::move(auth));
     } else {
@@ -140,7 +141,7 @@ protected:
 private:
   const AuthFactory& auth_factory_;
   const ExtractorConstPtr extractor_;
-  const absl::optional<std::string> provider_name_;
+  const std::string provider_name_;
 };
 
 class ProviderAndAudienceVerifierImpl : public ProviderVerifierImpl {
@@ -169,15 +170,13 @@ public:
   void verify(ContextSharedPtr context) const override {
     auto& ctximpl = static_cast<ContextImpl&>(*context);
     auto auth = auth_factory_.create(nullptr, absl::nullopt, true, true);
-    extractor_->sanitizePayloadHeaders(ctximpl.headers());
+    extractor_->sanitizeHeaders(ctximpl.headers());
     auth->verify(
         ctximpl.headers(), ctximpl.parentSpan(), extractor_->extract(ctximpl.headers()),
-        [&ctximpl](const std::string& name, const ProtobufWkt::Struct& payload) {
-          ctximpl.addPayload(name, payload);
+        [&ctximpl](const std::string& name, const ProtobufWkt::Struct& extracted_data) {
+          ctximpl.addExtractedData(name, extracted_data);
         },
-        [this, context](const Status& status) {
-          onComplete(status, static_cast<ContextImpl&>(*context));
-        });
+        [this, &ctximpl](const Status& status) { onComplete(status, ctximpl); });
     if (!ctximpl.getCompletionState(this).is_completed_) {
       ctximpl.storeAuth(std::move(auth));
     } else {
@@ -187,7 +186,6 @@ public:
 
 private:
   const AuthFactory& auth_factory_;
-  // const Extractor& extractor_;
   const ExtractorConstPtr extractor_;
 };
 
@@ -204,15 +202,13 @@ public:
     auto& ctximpl = static_cast<ContextImpl&>(*context);
     auto auth = auth_factory_.create(nullptr, absl::nullopt, false /* allow failed */,
                                      true /* allow missing */);
-    extractor_->sanitizePayloadHeaders(ctximpl.headers());
+    extractor_->sanitizeHeaders(ctximpl.headers());
     auth->verify(
         ctximpl.headers(), ctximpl.parentSpan(), extractor_->extract(ctximpl.headers()),
-        [&ctximpl](const std::string& name, const ProtobufWkt::Struct& payload) {
-          ctximpl.addPayload(name, payload);
+        [&ctximpl](const std::string& name, const ProtobufWkt::Struct& extracted_data) {
+          ctximpl.addExtractedData(name, extracted_data);
         },
-        [this, context](const Status& status) {
-          onComplete(status, static_cast<ContextImpl&>(*context));
-        });
+        [this, &ctximpl](const Status& status) { onComplete(status, ctximpl); });
     if (!ctximpl.getCompletionState(this).is_completed_) {
       ctximpl.storeAuth(std::move(auth));
     } else {
@@ -227,9 +223,7 @@ private:
 
 VerifierConstPtr innerCreate(const JwtRequirement& requirement,
                              const Protobuf::Map<std::string, JwtProvider>& providers,
-                             const AuthFactory& factory,
-                             const std::vector<std::string> parent_provider_names,
-                             const BaseVerifierImpl* parent);
+                             const AuthFactory& factory, const BaseVerifierImpl* parent);
 
 // Base verifier for requires all or any.
 class BaseGroupVerifierImpl : public BaseVerifierImpl {
@@ -258,39 +252,30 @@ public:
                   const Protobuf::Map<std::string, JwtProvider>& providers,
                   const BaseVerifierImpl* parent)
       : BaseGroupVerifierImpl(parent) {
-    const JwtRequirement* by_pass_type_requirement = nullptr;
-    std::vector<std::string> used_providers;
+
     for (const auto& it : or_list.requirements()) {
-      bool is_regular_requirement = true;
       switch (it.requires_type_case()) {
-      case JwtRequirement::RequiresTypeCase::kProviderName:
-        used_providers.emplace_back(it.provider_name());
-        break;
-      case JwtRequirement::RequiresTypeCase::kProviderAndAudiences:
-        used_providers.emplace_back(it.provider_and_audiences().provider_name());
-        break;
       case JwtRequirement::RequiresTypeCase::kAllowMissingOrFailed:
-      case JwtRequirement::RequiresTypeCase::kAllowMissing:
-        is_regular_requirement = false;
-        if (by_pass_type_requirement == nullptr ||
-            by_pass_type_requirement->requires_type_case() ==
-                JwtRequirement::RequiresTypeCase::kAllowMissing) {
-          // We need to keep only one by_pass_type_requirement. If both
-          // kAllowMissing and kAllowMissingOrFailed are set, use
-          // kAllowMissingOrFailed.
-          by_pass_type_requirement = &it;
-        }
-      default:
+        is_allow_missing_or_failed_ = true;
         break;
-      }
-      if (is_regular_requirement) {
-        verifiers_.emplace_back(
-            innerCreate(it, providers, factory, std::vector<std::string>{}, this));
+      case JwtRequirement::RequiresTypeCase::kAllowMissing:
+        is_allow_missing_ = true;
+        break;
+      default:
+        verifiers_.emplace_back(innerCreate(it, providers, factory, this));
+        break;
       }
     }
-    if (by_pass_type_requirement) {
-      verifiers_.emplace_back(
-          innerCreate(*by_pass_type_requirement, providers, factory, used_providers, this));
+
+    // RequiresAny only has one missing or failed requirement.
+    if (verifiers_.empty() && (is_allow_missing_or_failed_ || is_allow_missing_)) {
+      JwtRequirement requirement;
+      if (is_allow_missing_or_failed_) {
+        requirement.mutable_allow_missing_or_failed();
+      } else {
+        requirement.mutable_allow_missing();
+      }
+      verifiers_.emplace_back(innerCreate(requirement, providers, factory, this));
     }
   }
 
@@ -299,22 +284,44 @@ public:
     if (completion_state.is_completed_) {
       return;
     }
-    // For RequireAny: usually it returns the error from the last provider.
-    // But if a Jwt is not for a provider, its auth returns JwtMissed or JwtUnknownIssuer.
-    // Such error should not be used as the final error if there are other valid errors.
-    if (status != Status::Ok && status != Status::JwtMissed && status != Status::JwtUnknownIssuer) {
-      completion_state.any_valid_error_ = status;
-    }
-    if (++completion_state.number_completed_children_ == verifiers_.size() ||
-        Status::Ok == status) {
+
+    // If any of children is OK, return OK
+    if (Status::Ok == status) {
       completion_state.is_completed_ = true;
-      Status final_status = status;
-      if (status != Status::Ok && completion_state.any_valid_error_ != Status::Ok) {
-        final_status = completion_state.any_valid_error_;
+      completeWithStatus(status, context);
+      return;
+    }
+
+    // Then wait for all children to be done.
+    if (++completion_state.number_completed_children_ == verifiers_.size()) {
+      // Aggregate all children status into a final status.
+      // JwtMissed and JwtUnknownIssuer should be treated differently than other errors.
+      // JwtMissed means not Jwt token for the required provider.
+      // JwtUnknownIssuer means wrong issuer for the required provider.
+      Status final_status = Status::JwtMissed;
+      for (const auto& it : verifiers_) {
+        // Prefer errors which are not JwtMissed nor JwtUnknownIssuer.
+        // Prefer JwtUnknownIssuer between JwtMissed and JwtUnknownIssuer.
+        Status child_status = context.getCompletionState(it.get()).status_;
+        if ((child_status != Status::JwtMissed && child_status != Status::JwtUnknownIssuer) ||
+            final_status == Status::JwtMissed) {
+          final_status = child_status;
+        }
       }
+
+      if (is_allow_missing_or_failed_) {
+        final_status = Status::Ok;
+      } else if (is_allow_missing_ && final_status == Status::JwtMissed) {
+        final_status = Status::Ok;
+      }
+      completion_state.is_completed_ = true;
       completeWithStatus(final_status, context);
     }
   }
+
+private:
+  bool is_allow_missing_or_failed_{false};
+  bool is_allow_missing_{false};
 };
 
 // Requires all verifier
@@ -326,8 +333,7 @@ public:
                   const BaseVerifierImpl* parent)
       : BaseGroupVerifierImpl(parent) {
     for (const auto& it : and_list.requirements()) {
-      verifiers_.emplace_back(
-          innerCreate(it, providers, factory, std::vector<std::string>{}, this));
+      verifiers_.emplace_back(innerCreate(it, providers, factory, this));
     }
   }
 
@@ -354,21 +360,19 @@ public:
   }
 };
 
+JwtProviderList getAllProvidersAsList(const Protobuf::Map<std::string, JwtProvider>& providers) {
+  JwtProviderList list;
+  for (const auto& it : providers) {
+    list.emplace_back(&it.second);
+  }
+  return list;
+}
+
 VerifierConstPtr innerCreate(const JwtRequirement& requirement,
                              const Protobuf::Map<std::string, JwtProvider>& providers,
-                             const AuthFactory& factory,
-                             const std::vector<std::string> parent_provider_names,
-                             const BaseVerifierImpl* parent) {
+                             const AuthFactory& factory, const BaseVerifierImpl* parent) {
   std::string provider_name;
   std::vector<std::string> audiences;
-  JwtProviderList parent_providers;
-  for (const auto& name : parent_provider_names) {
-    const auto& it = providers.find(name);
-    if (it == providers.end()) {
-      throw EnvoyException(fmt::format("Required provider ['{}'] is not configured.", name));
-    }
-    parent_providers.emplace_back(&it->second);
-  }
   switch (requirement.requires_type_case()) {
   case JwtRequirement::RequiresTypeCase::kProviderName:
     provider_name = requirement.provider_name();
@@ -386,13 +390,13 @@ VerifierConstPtr innerCreate(const JwtRequirement& requirement,
     return std::make_unique<AllVerifierImpl>(requirement.requires_all(), factory, providers,
                                              parent);
   case JwtRequirement::RequiresTypeCase::kAllowMissingOrFailed:
-    return std::make_unique<AllowFailedVerifierImpl>(factory, parent_providers, parent);
+    return std::make_unique<AllowFailedVerifierImpl>(factory, getAllProvidersAsList(providers),
+                                                     parent);
   case JwtRequirement::RequiresTypeCase::kAllowMissing:
-    return std::make_unique<AllowMissingVerifierImpl>(factory, parent_providers, parent);
+    return std::make_unique<AllowMissingVerifierImpl>(factory, getAllProvidersAsList(providers),
+                                                      parent);
   case JwtRequirement::RequiresTypeCase::REQUIRES_TYPE_NOT_SET:
     return std::make_unique<AllowAllVerifierImpl>(parent);
-  default:
-    NOT_REACHED_GCOVR_EXCL_LINE;
   }
 
   const auto& it = providers.find(provider_name);
@@ -410,13 +414,13 @@ VerifierConstPtr innerCreate(const JwtRequirement& requirement,
 
 ContextSharedPtr Verifier::createContext(Http::RequestHeaderMap& headers,
                                          Tracing::Span& parent_span, Callbacks* callback) {
-  return std::make_shared<ContextImpl>(headers, parent_span, callback);
+  return std::make_shared<ContextImpl>(headers, parent_span, *callback);
 }
 
 VerifierConstPtr Verifier::create(const JwtRequirement& requirement,
                                   const Protobuf::Map<std::string, JwtProvider>& providers,
                                   const AuthFactory& factory) {
-  return innerCreate(requirement, providers, factory, std::vector<std::string>{}, nullptr);
+  return innerCreate(requirement, providers, factory, nullptr);
 }
 
 } // namespace JwtAuthn

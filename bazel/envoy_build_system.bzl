@@ -1,27 +1,35 @@
 # The main Envoy bazel file. Load this file for all Envoy-specific build macros
 # and rules that you'd like to use in your BUILD files.
-load("@rules_foreign_cc//tools/build_defs:cmake.bzl", "cmake_external")
+load("@rules_foreign_cc//foreign_cc:cmake.bzl", "cmake")
 load(":envoy_binary.bzl", _envoy_cc_binary = "envoy_cc_binary")
 load(":envoy_internal.bzl", "envoy_external_dep_path")
 load(
     ":envoy_library.bzl",
     _envoy_basic_cc_library = "envoy_basic_cc_library",
+    _envoy_cc_contrib_extension = "envoy_cc_contrib_extension",
     _envoy_cc_extension = "envoy_cc_extension",
     _envoy_cc_library = "envoy_cc_library",
+    _envoy_cc_linux_library = "envoy_cc_linux_library",
     _envoy_cc_posix_library = "envoy_cc_posix_library",
+    _envoy_cc_posix_without_linux_library = "envoy_cc_posix_without_linux_library",
     _envoy_cc_win32_library = "envoy_cc_win32_library",
-    _envoy_include_prefix = "envoy_include_prefix",
     _envoy_proto_library = "envoy_proto_library",
 )
+load(":envoy_pch.bzl", _envoy_pch_library = "envoy_pch_library")
 load(
     ":envoy_select.bzl",
+    _envoy_select_admin_functionality = "envoy_select_admin_functionality",
+    _envoy_select_admin_html = "envoy_select_admin_html",
+    _envoy_select_admin_no_html = "envoy_select_admin_no_html",
     _envoy_select_boringssl = "envoy_select_boringssl",
+    _envoy_select_enable_http3 = "envoy_select_enable_http3",
     _envoy_select_google_grpc = "envoy_select_google_grpc",
     _envoy_select_hot_restart = "envoy_select_hot_restart",
-    _envoy_select_new_codecs_in_integration_tests = "envoy_select_new_codecs_in_integration_tests",
-    _envoy_select_wasm = "envoy_select_wasm",
-    _envoy_select_wasm_all_v8_wavm_none = "envoy_select_wasm_all_v8_wavm_none",
+    _envoy_select_wasm_cpp_tests = "envoy_select_wasm_cpp_tests",
+    _envoy_select_wasm_rust_tests = "envoy_select_wasm_rust_tests",
     _envoy_select_wasm_v8 = "envoy_select_wasm_v8",
+    _envoy_select_wasm_wamr = "envoy_select_wasm_wamr",
+    _envoy_select_wasm_wasmtime = "envoy_select_wasm_wasmtime",
     _envoy_select_wasm_wavm = "envoy_select_wasm_wavm",
 )
 load(
@@ -33,19 +41,41 @@ load(
     _envoy_cc_test = "envoy_cc_test",
     _envoy_cc_test_binary = "envoy_cc_test_binary",
     _envoy_cc_test_library = "envoy_cc_test_library",
+    _envoy_py_test = "envoy_py_test",
     _envoy_py_test_binary = "envoy_py_test_binary",
     _envoy_sh_test = "envoy_sh_test",
 )
 load(
     "@envoy_build_config//:extensions_build_config.bzl",
+    "CONTRIB_EXTENSION_PACKAGE_VISIBILITY",
     "EXTENSION_PACKAGE_VISIBILITY",
+    "MOBILE_PACKAGE_VISIBILITY",
 )
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 
-def envoy_package():
-    native.package(default_visibility = ["//visibility:public"])
+def envoy_package(default_visibility = ["//visibility:public"]):
+    native.package(default_visibility = default_visibility)
 
-def envoy_extension_package():
-    native.package(default_visibility = EXTENSION_PACKAGE_VISIBILITY)
+def envoy_extension_package(enabled_default = True, default_visibility = EXTENSION_PACKAGE_VISIBILITY):
+    native.package(default_visibility = default_visibility)
+
+    bool_flag(
+        name = "enabled",
+        build_setting_default = enabled_default,
+    )
+
+    native.config_setting(
+        name = "is_enabled",
+        flag_values = {":enabled": "True"},
+    )
+
+def envoy_mobile_package():
+    # Mobile packages should only be visible to other mobile packages, not any other
+    # parts of the Envoy codebase.
+    envoy_extension_package(default_visibility = MOBILE_PACKAGE_VISIBILITY)
+
+def envoy_contrib_package():
+    envoy_extension_package(default_visibility = CONTRIB_EXTENSION_PACKAGE_VISIBILITY)
 
 # A genrule variant that can output a directory. This is useful when doing things like
 # generating a fuzz corpus mechanically.
@@ -71,15 +101,12 @@ envoy_directory_genrule = rule(
 
 # External CMake C++ library targets should be specified with this function. This defaults
 # to building the dependencies with ninja
-def envoy_cmake_external(
+def envoy_cmake(
         name,
         cache_entries = {},
         debug_cache_entries = {},
-        cmake_options = ["-GNinja"],
-        make_commands = ["ninja -v", "ninja -v install"],
         lib_source = "",
         postfix_script = "",
-        static_libraries = [],
         copy_pdb = False,
         pdb_name = "",
         cmake_files_dir = "$BUILD_TMPDIR/CMakeFiles",
@@ -107,22 +134,23 @@ def envoy_cmake_external(
     else:
         pf = postfix_script
 
-    cmake_external(
+    cmake(
         name = name,
         cache_entries = select({
             "@envoy//bazel:dbg_build": cache_entries_debug,
             "//conditions:default": cache_entries,
         }),
-        cmake_options = cmake_options,
+        generate_args = ["-GNinja"],
+        targets = ["", "install"],
+        # TODO: Remove install target and make this work
+        install = False,
         # TODO(lizan): Make this always true
         generate_crosstool_file = select({
             "@envoy//bazel:windows_x86_64": True,
             "//conditions:default": generate_crosstool_file,
         }),
         lib_source = lib_source,
-        make_commands = make_commands,
         postfix_script = pf,
-        static_libraries = static_libraries,
         **kwargs
     )
 
@@ -132,6 +160,16 @@ def envoy_cmake_external(
 def envoy_cc_platform_dep(name):
     return select({
         "@envoy//bazel:windows_x86_64": [name + "_win32"],
+        "//conditions:default": [name + "_posix"],
+    })
+
+# Used to select a dependency that has different implementations on Linux vs rest of POSIX vs Windows.
+# The platform-specific implementations should be specified with envoy_cc_linux_library,
+# envoy_cc_posix_without_library and envoy_cc_win32_library respectively
+def envoy_cc_platform_specific_dep(name):
+    return select({
+        "@envoy//bazel:windows_x86_64": [name + "_win32"],
+        "@envoy//bazel:linux": [name + "_linux"],
         "//conditions:default": [name + "_posix"],
     })
 
@@ -177,14 +215,19 @@ def envoy_google_grpc_external_deps():
 # from the other bzl files (e.g. envoy_select.bzl, envoy_binary.bzl, etc.)
 
 # Select wrappers (from envoy_select.bzl)
+envoy_select_admin_html = _envoy_select_admin_html
+envoy_select_admin_no_html = _envoy_select_admin_no_html
+envoy_select_admin_functionality = _envoy_select_admin_functionality
 envoy_select_boringssl = _envoy_select_boringssl
 envoy_select_google_grpc = _envoy_select_google_grpc
+envoy_select_enable_http3 = _envoy_select_enable_http3
 envoy_select_hot_restart = _envoy_select_hot_restart
-envoy_select_wasm = _envoy_select_wasm
-envoy_select_wasm_all_v8_wavm_none = _envoy_select_wasm_all_v8_wavm_none
-envoy_select_wasm_wavm = _envoy_select_wasm_wavm
+envoy_select_wasm_cpp_tests = _envoy_select_wasm_cpp_tests
+envoy_select_wasm_rust_tests = _envoy_select_wasm_rust_tests
 envoy_select_wasm_v8 = _envoy_select_wasm_v8
-envoy_select_new_codecs_in_integration_tests = _envoy_select_new_codecs_in_integration_tests
+envoy_select_wasm_wamr = _envoy_select_wasm_wamr
+envoy_select_wasm_wavm = _envoy_select_wasm_wavm
+envoy_select_wasm_wasmtime = _envoy_select_wasm_wasmtime
 
 # Binary wrappers (from envoy_binary.bzl)
 envoy_cc_binary = _envoy_cc_binary
@@ -192,11 +235,14 @@ envoy_cc_binary = _envoy_cc_binary
 # Library wrappers (from envoy_library.bzl)
 envoy_basic_cc_library = _envoy_basic_cc_library
 envoy_cc_extension = _envoy_cc_extension
+envoy_cc_contrib_extension = _envoy_cc_contrib_extension
 envoy_cc_library = _envoy_cc_library
+envoy_cc_linux_library = _envoy_cc_linux_library
 envoy_cc_posix_library = _envoy_cc_posix_library
+envoy_cc_posix_without_linux_library = _envoy_cc_posix_without_linux_library
 envoy_cc_win32_library = _envoy_cc_win32_library
-envoy_include_prefix = _envoy_include_prefix
 envoy_proto_library = _envoy_proto_library
+envoy_pch_library = _envoy_pch_library
 
 # Test wrappers (from envoy_test.bzl)
 envoy_cc_fuzz_test = _envoy_cc_fuzz_test
@@ -206,5 +252,6 @@ envoy_cc_test_binary = _envoy_cc_test_binary
 envoy_cc_test_library = _envoy_cc_test_library
 envoy_cc_benchmark_binary = _envoy_cc_benchmark_binary
 envoy_benchmark_test = _envoy_benchmark_test
+envoy_py_test = _envoy_py_test
 envoy_py_test_binary = _envoy_py_test_binary
 envoy_sh_test = _envoy_sh_test

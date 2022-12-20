@@ -1,46 +1,48 @@
 #include "envoy/extensions/filters/http/buffer/v3/buffer.pb.h"
 #include "envoy/extensions/filters/network/http_connection_manager/v3/http_connection_manager.pb.h"
 
-#include "common/protobuf/utility.h"
+#include "source/common/protobuf/utility.h"
 
 #include "test/integration/http_protocol_integration.h"
 
 namespace Envoy {
 namespace {
 
-using BufferIntegrationTest = HttpProtocolIntegrationTest;
+using BufferIntegrationTest = UpstreamDownstreamIntegrationTest;
 
-INSTANTIATE_TEST_SUITE_P(Protocols, BufferIntegrationTest,
-                         testing::ValuesIn(HttpProtocolIntegrationTest::getProtocolTestParams()),
-                         HttpProtocolIntegrationTest::protocolTestParamsToString);
+INSTANTIATE_TEST_SUITE_P(
+    Protocols, BufferIntegrationTest,
+    testing::ValuesIn(UpstreamDownstreamIntegrationTest::getDefaultTestParams()),
+    UpstreamDownstreamIntegrationTest::testParamsToString);
 
 TEST_P(BufferIntegrationTest, RouterNotFoundBodyBuffer) {
-  config_helper_.addFilter(ConfigHelper::defaultBufferFilter());
+  config_helper_.prependFilter(ConfigHelper::defaultBufferFilter(), testing_downstream_filter_);
   testRouterNotFoundWithBody();
 }
 
 TEST_P(BufferIntegrationTest, RouterRequestAndResponseWithGiantBodyBuffer) {
-  config_helper_.addFilter(ConfigHelper::defaultBufferFilter());
+  config_helper_.prependFilter(ConfigHelper::defaultBufferFilter(), testing_downstream_filter_);
   testRouterRequestAndResponseWithBody(4 * 1024 * 1024, 4 * 1024 * 1024, false);
 }
 
 TEST_P(BufferIntegrationTest, RouterHeaderOnlyRequestAndResponseBuffer) {
-  config_helper_.addFilter(ConfigHelper::defaultBufferFilter());
+  config_helper_.prependFilter(ConfigHelper::defaultBufferFilter(), testing_downstream_filter_);
   testRouterHeaderOnlyRequestAndResponse();
 }
 
 TEST_P(BufferIntegrationTest, RouterRequestAndResponseWithBodyBuffer) {
-  config_helper_.addFilter(ConfigHelper::defaultBufferFilter());
+  config_helper_.prependFilter(ConfigHelper::defaultBufferFilter(), testing_downstream_filter_);
   testRouterRequestAndResponseWithBody(1024, 512, false);
 }
 
 TEST_P(BufferIntegrationTest, RouterRequestAndResponseWithZeroByteBodyBuffer) {
-  config_helper_.addFilter(ConfigHelper::defaultBufferFilter());
+  config_helper_.prependFilter(ConfigHelper::defaultBufferFilter(), testing_downstream_filter_);
   testRouterRequestAndResponseWithBody(0, 0, false);
 }
 
 TEST_P(BufferIntegrationTest, RouterRequestPopulateContentLength) {
-  config_helper_.addFilter(ConfigHelper::defaultBufferFilter());
+  config_helper_.addRuntimeOverride("envoy.reloadable_features.allow_upstream_filters", "true");
+  config_helper_.prependFilter(ConfigHelper::defaultBufferFilter(), testing_downstream_filter_);
   initialize();
 
   codec_client_ = makeHttpConnection(lookupPort("http"));
@@ -61,13 +63,14 @@ TEST_P(BufferIntegrationTest, RouterRequestPopulateContentLength) {
   ASSERT_NE(content_length, nullptr);
   EXPECT_EQ(content_length->value().getStringView(), "9");
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("200", response->headers().getStatusValue());
 }
 
 TEST_P(BufferIntegrationTest, RouterRequestPopulateContentLengthOnTrailers) {
-  config_helper_.addFilter(ConfigHelper::defaultBufferFilter());
+  config_helper_.addRuntimeOverride("envoy.reloadable_features.allow_upstream_filters", "true");
+  config_helper_.prependFilter(ConfigHelper::defaultBufferFilter(), testing_downstream_filter_);
   initialize();
 
   codec_client_ = makeHttpConnection(lookupPort("http"));
@@ -90,12 +93,13 @@ TEST_P(BufferIntegrationTest, RouterRequestPopulateContentLengthOnTrailers) {
   ASSERT_NE(content_length, nullptr);
   EXPECT_EQ(content_length->value().getStringView(), "10");
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("200", response->headers().getStatusValue());
 }
 
 TEST_P(BufferIntegrationTest, RouterRequestBufferLimitExceeded) {
+  config_helper_.addRuntimeOverride("envoy.reloadable_features.allow_upstream_filters", "true");
   // Make sure the connection isn't closed during request upload.
   // Without a large drain-close it's possible that the local reply will be sent
   // during request upload, and continued upload will result in TCP reset before
@@ -103,7 +107,7 @@ TEST_P(BufferIntegrationTest, RouterRequestBufferLimitExceeded) {
   config_helper_.addConfigModifier(
       [](envoy::extensions::filters::network::http_connection_manager::v3::HttpConnectionManager&
              hcm) { hcm.mutable_delayed_close_timeout()->set_seconds(2000 * 1000); });
-  config_helper_.addFilter(ConfigHelper::smallBufferFilter());
+  config_helper_.prependFilter(ConfigHelper::smallBufferFilter(), testing_downstream_filter_);
   initialize();
 
   codec_client_ = makeHttpConnection(lookupPort("http"));
@@ -115,9 +119,9 @@ TEST_P(BufferIntegrationTest, RouterRequestBufferLimitExceeded) {
                                      {":authority", "host"},
                                      {"x-forwarded-for", "10.0.0.1"},
                                      {"x-envoy-retry-on", "5xx"}},
-      1024 * 65);
+      1024 * 65, false);
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("413", response->headers().getStatusValue());
 }
@@ -140,9 +144,12 @@ ConfigHelper::HttpModifierFunction overrideConfig(const std::string& json_config
 }
 
 TEST_P(BufferIntegrationTest, RouteDisabled) {
+  if (!testing_downstream_filter_) {
+    return;
+  }
   ConfigHelper::HttpModifierFunction mod = overrideConfig(R"EOF({"disabled": true})EOF");
   config_helper_.addConfigModifier(mod);
-  config_helper_.addFilter(ConfigHelper::smallBufferFilter());
+  config_helper_.prependFilter(ConfigHelper::smallBufferFilter(), testing_downstream_filter_);
   config_helper_.setBufferLimits(1024, 1024);
 
   initialize();
@@ -159,17 +166,20 @@ TEST_P(BufferIntegrationTest, RouteDisabled) {
   waitForNextUpstreamRequest();
   upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("200", response->headers().getStatusValue());
 }
 
 TEST_P(BufferIntegrationTest, RouteOverride) {
+  if (!testing_downstream_filter_) {
+    return;
+  }
   ConfigHelper::HttpModifierFunction mod = overrideConfig(R"EOF({"buffer": {
     "max_request_bytes": 5242880
   }})EOF");
   config_helper_.addConfigModifier(mod);
-  config_helper_.addFilter(ConfigHelper::smallBufferFilter());
+  config_helper_.prependFilter(ConfigHelper::smallBufferFilter(), testing_downstream_filter_);
 
   initialize();
 
@@ -185,7 +195,7 @@ TEST_P(BufferIntegrationTest, RouteOverride) {
   waitForNextUpstreamRequest();
   upstream_request_->encodeHeaders(Http::TestResponseHeaderMapImpl{{":status", "200"}}, true);
 
-  response->waitForEndStream();
+  ASSERT_TRUE(response->waitForEndStream());
   ASSERT_TRUE(response->complete());
   EXPECT_EQ("200", response->headers().getStatusValue());
 }

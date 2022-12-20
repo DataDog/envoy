@@ -9,7 +9,7 @@
 #include "source/extensions/common/wasm/ext/envoy_proxy_wasm_api.h"
 #include "source/extensions/common/wasm/ext/declare_property.pb.h"
 #else
-#include "extensions/common/wasm/ext/envoy_null_plugin.h"
+#include "source/extensions/common/wasm/ext/envoy_null_plugin.h"
 #include "absl/base/casts.h"
 #endif
 
@@ -35,8 +35,10 @@ public:
 
   FilterHeadersStatus onRequestHeaders(uint32_t, bool) override;
   FilterTrailersStatus onRequestTrailers(uint32_t) override;
+  FilterHeadersStatus onResponseHeaders(uint32_t, bool) override;
   FilterTrailersStatus onResponseTrailers(uint32_t) override;
   FilterDataStatus onRequestBody(size_t body_buffer_length, bool end_of_stream) override;
+  FilterDataStatus onResponseBody(size_t body_buffer_length, bool end_of_stream) override;
   void onLog() override;
   void onDone() override;
 
@@ -52,14 +54,19 @@ bool TestRootContext::onStart(size_t configuration_size) {
   return true;
 }
 
-bool TestRootContext::onConfigure(size_t) {
+bool TestRootContext::onConfigure(size_t size) {
+  if (size > 0 &&
+      getBufferBytes(WasmBufferType::PluginConfiguration, 0, size)->toString() == "invalid") {
+    return false;
+  }
   if (test_ == "property") {
     {
       // Many properties are not available in the root context.
       const std::vector<std::string> properties = {
           "string_state",     "metadata",   "request",        "response",    "connection",
           "connection_id",    "upstream",   "source",         "destination", "cluster_name",
-          "cluster_metadata", "route_name", "route_metadata",
+          "cluster_metadata", "route_name", "route_metadata", "upstream_host_metadata",
+          "filter_state",
       };
       for (const auto& property : properties) {
         if (getProperty({property}).has_value()) {
@@ -93,6 +100,16 @@ FilterHeadersStatus TestContext::onRequestHeaders(uint32_t, bool) {
   root()->stream_context_id_ = id();
   auto test = root()->test_;
   if (test == "headers") {
+    std::string msg = "";
+    if (auto value = std::getenv("ENVOY_HTTP_WASM_TEST_HEADERS_HOST_ENV")) {
+      msg += "ENVOY_HTTP_WASM_TEST_HEADERS_HOST_ENV: " + std::string(value);
+    }
+    if (auto value = std::getenv("ENVOY_HTTP_WASM_TEST_HEADERS_KEY_VALUE_ENV")) {
+      msg += "\nENVOY_HTTP_WASM_TEST_HEADERS_KEY_VALUE_ENV: " + std::string(value);
+    }
+    if (!msg.empty()) {
+      logTrace(msg);
+    }
     logDebug(std::string("onRequestHeaders ") + std::to_string(id()) + std::string(" ") + test);
     auto path = getRequestHeader(":path");
     logInfo(std::string("header path ") + std::string(path->view()));
@@ -163,8 +180,8 @@ FilterHeadersStatus TestContext::onRequestHeaders(uint32_t, bool) {
     {
       // Validate a valid CEL expression
       const std::string expr = R"(
-  envoy.api.v2.core.GrpcService{
-    envoy_grpc: envoy.api.v2.core.GrpcService.EnvoyGrpc {
+  envoy.config.core.v3.GrpcService{
+    envoy_grpc: envoy.config.core.v3.GrpcService.EnvoyGrpc {
       cluster_name: "test"
     }
   })";
@@ -277,6 +294,15 @@ FilterTrailersStatus TestContext::onRequestTrailers(uint32_t) {
   return FilterTrailersStatus::Continue;
 }
 
+FilterHeadersStatus TestContext::onResponseHeaders(uint32_t, bool) {
+  root()->stream_context_id_ = id();
+  auto test = root()->test_;
+  if (test == "headers") {
+    CHECK_RESULT(addResponseHeader("test-status", "OK"));
+  }
+  return FilterHeadersStatus::Continue;
+}
+
 FilterTrailersStatus TestContext::onResponseTrailers(uint32_t) {
   auto value = getResponseTrailer("bogus-trailer");
   if (value && value->view() != "") {
@@ -286,11 +312,14 @@ FilterTrailersStatus TestContext::onResponseTrailers(uint32_t) {
   return FilterTrailersStatus::StopIteration;
 }
 
-FilterDataStatus TestContext::onRequestBody(size_t body_buffer_length, bool) {
+FilterDataStatus TestContext::onRequestBody(size_t body_buffer_length, bool end_of_stream) {
   auto test = root()->test_;
   if (test == "headers") {
     auto body = getBufferBytes(WasmBufferType::HttpRequestBody, 0, body_buffer_length);
     logError(std::string("onBody ") + std::string(body->view()));
+    if (end_of_stream) {
+      CHECK_RESULT(addRequestTrailer("newtrailer", "request"));
+    }
   } else if (test == "metadata") {
     std::string value;
     if (!getValue({"node", "metadata", "wasm_node_get_key"}, &value)) {
@@ -315,11 +344,23 @@ FilterDataStatus TestContext::onRequestBody(size_t body_buffer_length, bool) {
   return FilterDataStatus::Continue;
 }
 
+FilterDataStatus TestContext::onResponseBody(size_t, bool end_of_stream) {
+  auto test = root()->test_;
+  if (test == "headers") {
+    if (end_of_stream) {
+      CHECK_RESULT(addResponseTrailer("newtrailer", "response"));
+    }
+  }
+  return FilterDataStatus::Continue;
+}
+
 void TestContext::onLog() {
   auto test = root()->test_;
   if (test == "headers") {
     auto path = getRequestHeader(":path");
-    logWarn("onLog " + std::to_string(id()) + " " + std::string(path->view()));
+    auto status = getResponseHeader(":status");
+    logWarn("onLog " + std::to_string(id()) + " " + std::string(path->view()) + " " +
+            std::string(status->view()));
     auto response_header = getResponseHeader("bogus-header");
     if (response_header && response_header->view() != "") {
       logWarn("response bogus-header found");
@@ -328,11 +369,15 @@ void TestContext::onLog() {
     if (response_trailer && response_trailer->view() != "") {
       logWarn("response bogus-trailer found");
     }
+    auto request_trailer = getRequestTrailer("error-details");
+    if (request_trailer && request_trailer->view() != "") {
+      logWarn("request bogus-trailer found");
+    }
   } else if (test == "cluster_metadata") {
-      std::string cluster_metadata;
-      if (getValue({"cluster_metadata", "filter_metadata", "namespace", "key"}, &cluster_metadata)) {
-        logWarn("cluster metadata: " + cluster_metadata);
-      }
+    std::string cluster_metadata;
+    if (getValue({"cluster_metadata", "filter_metadata", "namespace", "key"}, &cluster_metadata)) {
+      logWarn("cluster metadata: " + cluster_metadata);
+    }
   } else if (test == "property") {
     setFilterState("wasm_state", "wasm_value");
     auto path = getRequestHeader(":path");

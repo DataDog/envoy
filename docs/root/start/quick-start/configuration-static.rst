@@ -7,7 +7,7 @@ To start Envoy with static configuration, you will need to specify :ref:`listene
 and :ref:`clusters <start_quick_start_static_clusters>` as
 :ref:`static_resources <start_quick_start_static_static_resources>`.
 
-You can also add an :ref:`admin <start_quick_start_static_admin>` section if you wish to monitor Envoy
+You can also add an :ref:`admin <start_quick_start_admin>` section if you wish to monitor Envoy
 or retrieve stats.
 
 The following sections walk through the static configuration provided in the
@@ -26,6 +26,7 @@ everything that is configured statically when Envoy starts, as opposed to dynami
     :linenos:
     :lines: 1-3
     :emphasize-lines: 1
+    :caption: :download:`envoy-demo.yaml <_include/envoy-demo.yaml>`
 
 .. _start_quick_start_static_listeners:
 
@@ -41,40 +42,21 @@ All paths are matched and routed to the ``service_envoyproxy_io``
 .. literalinclude:: _include/envoy-demo.yaml
     :language: yaml
     :linenos:
-    :lines: 1-29
-    :emphasize-lines: 3-27
+    :lines: 1-36
+    :emphasize-lines: 3-33
+    :caption: :download:`envoy-demo.yaml <_include/envoy-demo.yaml>`
 
 .. _start_quick_start_static_clusters:
 
 ``clusters``
 ------------
 
-The ``service_envoyproxy_io`` :ref:`cluster <envoy_v3_api_file_envoy/service/cluster/v3/cds.proto>`
+The ``service_envoyproxy_io`` :ref:`cluster <envoy_v3_api_file_envoy/config/cluster/v3/cluster.proto>`
 proxies over ``TLS`` to https://www.envoyproxy.io.
 
 .. literalinclude:: _include/envoy-demo.yaml
     :language: yaml
-    :lineno-start: 27
-    :lines: 27-50
-    :emphasize-lines: 3-22
-
-.. _start_quick_start_static_admin:
-
-``admin``
----------
-
-The :ref:`admin message <envoy_v3_api_msg_config.bootstrap.v3.Admin>` is required to enable and configure
-the administration server.
-
-The ``address`` key specifies the listening :ref:`address <envoy_v3_api_file_envoy/config/core/v3/address.proto>`
-which in the demo configuration is ``0.0.0.0:9901``.
-
-.. literalinclude:: _include/envoy-demo.yaml
-    :language: yaml
-    :lineno-start: 48
-    :lines: 48-55
-    :emphasize-lines: 3-8
-
-.. warning::
-
-   You may wish to restrict the network address the admin server listens to in your own deployment.
+    :lineno-start: 31
+    :lines: 31-53
+    :emphasize-lines: 5-23
+    :caption: :download:`envoy-demo.yaml <_include/envoy-demo.yaml>`

@@ -2,11 +2,12 @@
 
 #include "envoy/server/instance.h"
 
-#include "common/grpc/context_impl.h"
-#include "common/http/context_impl.h"
-#include "common/stats/symbol_table_impl.h"
-
-#include "extensions/transport_sockets/tls/context_manager_impl.h"
+#include "source/common/grpc/context_impl.h"
+#include "source/common/http/context_impl.h"
+#include "source/common/quic/quic_stat_names.h"
+#include "source/common/router/context_impl.h"
+#include "source/common/stats/symbol_table.h"
+#include "source/extensions/transport_sockets/tls/context_manager_impl.h"
 
 #include "test/mocks/access_log/mocks.h"
 #include "test/mocks/api/mocks.h"
@@ -37,6 +38,7 @@ namespace Envoy {
 namespace Server {
 namespace Configuration {
 class MockServerFactoryContext;
+class MockStatsConfig;
 } // namespace Configuration
 
 class MockInstance : public Instance {
@@ -44,11 +46,12 @@ public:
   MockInstance();
   ~MockInstance() override;
 
-  Secret::SecretManager& secretManager() override { return *(secret_manager_.get()); }
+  Secret::SecretManager& secretManager() override { return *(secret_manager_); }
 
-  MOCK_METHOD(Admin&, admin, ());
+  MOCK_METHOD(OptRef<Admin>, admin, ());
   MOCK_METHOD(Api::Api&, api, ());
   MOCK_METHOD(Upstream::ClusterManager&, clusterManager, ());
+  MOCK_METHOD(const Upstream::ClusterManager&, clusterManager, (), (const));
   MOCK_METHOD(Ssl::ContextManager&, sslContextManager, ());
   MOCK_METHOD(Event::Dispatcher&, dispatcher, ());
   MOCK_METHOD(Network::DnsResolverSharedPtr, dnsResolver, ());
@@ -56,7 +59,6 @@ public:
   MOCK_METHOD(DrainManager&, drainManager, ());
   MOCK_METHOD(AccessLog::AccessLogManager&, accessLogManager, ());
   MOCK_METHOD(void, failHealthcheck, (bool fail));
-  MOCK_METHOD(void, exportStatsToChild, (envoy::HotRestartMessage::Reply::Stats*));
   MOCK_METHOD(bool, healthCheckFailed, ());
   MOCK_METHOD(HotRestart&, hotRestart, ());
   MOCK_METHOD(Init::Manager&, initManager, ());
@@ -75,18 +77,23 @@ public:
   MOCK_METHOD(Stats::Store&, stats, ());
   MOCK_METHOD(Grpc::Context&, grpcContext, ());
   MOCK_METHOD(Http::Context&, httpContext, ());
+  MOCK_METHOD(Router::Context&, routerContext, ());
   MOCK_METHOD(ProcessContextOptRef, processContext, ());
   MOCK_METHOD(ThreadLocal::Instance&, threadLocal, ());
-  MOCK_METHOD(const LocalInfo::LocalInfo&, localInfo, (), (const));
-  MOCK_METHOD(std::chrono::milliseconds, statsFlushInterval, (), (const));
+  MOCK_METHOD(LocalInfo::LocalInfo&, localInfo, (), (const));
+  MOCK_METHOD(Configuration::StatsConfig&, statsConfig, (), ());
   MOCK_METHOD(void, flushStats, ());
   MOCK_METHOD(ProtobufMessage::ValidationContext&, messageValidationContext, ());
   MOCK_METHOD(Configuration::ServerFactoryContext&, serverFactoryContext, ());
   MOCK_METHOD(Configuration::TransportSocketFactoryContext&, transportSocketFactoryContext, ());
+  MOCK_METHOD(bool, enableReusePortDefault, ());
+  MOCK_METHOD(void, setSinkPredicates, (std::unique_ptr<Envoy::Stats::SinkPredicates> &&));
 
   void setDefaultTracingConfig(const envoy::config::trace::v3::Tracing& tracing_config) override {
     http_context_.setDefaultTracingConfig(tracing_config);
   }
+
+  envoy::config::bootstrap::v3::Bootstrap& bootstrap() override { return bootstrap_; }
 
   TimeSource& timeSource() override { return time_system_; }
 
@@ -115,7 +122,11 @@ public:
   Singleton::ManagerPtr singleton_manager_;
   Grpc::ContextImpl grpc_context_;
   Http::ContextImpl http_context_;
+  envoy::config::bootstrap::v3::Bootstrap bootstrap_;
+  Router::ContextImpl router_context_;
+  Quic::QuicStatNames quic_stat_names_;
   testing::NiceMock<ProtobufMessage::MockValidationContext> validation_context_;
+  std::shared_ptr<testing::NiceMock<Configuration::MockStatsConfig>> stats_config_;
   std::shared_ptr<testing::NiceMock<Configuration::MockServerFactoryContext>>
       server_factory_context_;
   std::shared_ptr<testing::NiceMock<Configuration::MockTransportSocketFactoryContext>>
@@ -123,30 +134,46 @@ public:
 };
 
 namespace Configuration {
+class MockStatsConfig : public virtual StatsConfig {
+public:
+  MockStatsConfig();
+  ~MockStatsConfig() override;
+
+  MOCK_METHOD(const std::list<Stats::SinkPtr>&, sinks, (), (const));
+  MOCK_METHOD(std::chrono::milliseconds, flushInterval, (), (const));
+  MOCK_METHOD(bool, flushOnAdmin, (), (const));
+  MOCK_METHOD(const Stats::SinkPredicates*, sinkPredicates, (), (const));
+};
+
 class MockServerFactoryContext : public virtual ServerFactoryContext {
 public:
   MockServerFactoryContext();
   ~MockServerFactoryContext() override;
 
   MOCK_METHOD(Upstream::ClusterManager&, clusterManager, ());
-  MOCK_METHOD(Event::Dispatcher&, dispatcher, ());
+  MOCK_METHOD(Event::Dispatcher&, mainThreadDispatcher, ());
+  MOCK_METHOD(const Server::Options&, options, ());
   MOCK_METHOD(const Network::DrainDecision&, drainDecision, ());
   MOCK_METHOD(const LocalInfo::LocalInfo&, localInfo, (), (const));
   MOCK_METHOD(Envoy::Runtime::Loader&, runtime, ());
   MOCK_METHOD(Stats::Scope&, scope, ());
+  MOCK_METHOD(Stats::Scope&, serverScope, ());
   MOCK_METHOD(Singleton::Manager&, singletonManager, ());
   MOCK_METHOD(ThreadLocal::Instance&, threadLocal, ());
-  MOCK_METHOD(Server::Admin&, admin, ());
+  MOCK_METHOD(OptRef<Server::Admin>, admin, ());
   MOCK_METHOD(TimeSource&, timeSource, ());
   Event::TestTimeSystem& timeSystem() { return time_system_; }
   MOCK_METHOD(ProtobufMessage::ValidationContext&, messageValidationContext, ());
   MOCK_METHOD(ProtobufMessage::ValidationVisitor&, messageValidationVisitor, ());
   MOCK_METHOD(Api::Api&, api, ());
   Grpc::Context& grpcContext() override { return grpc_context_; }
+  Router::Context& routerContext() override { return router_context_; }
+  envoy::config::bootstrap::v3::Bootstrap& bootstrap() override { return bootstrap_; }
   MOCK_METHOD(Server::DrainManager&, drainManager, ());
   MOCK_METHOD(Init::Manager&, initManager, ());
   MOCK_METHOD(ServerLifecycleNotifier&, lifecycleNotifier, ());
-  MOCK_METHOD(std::chrono::milliseconds, statsFlushInterval, (), (const));
+  MOCK_METHOD(StatsConfig&, statsConfig, (), ());
+  MOCK_METHOD(AccessLog::AccessLogManager&, accessLogManager, (), ());
 
   testing::NiceMock<Upstream::MockClusterManager> cluster_manager_;
   testing::NiceMock<Event::MockDispatcher> dispatcher_;
@@ -156,12 +183,21 @@ public:
   testing::NiceMock<Stats::MockIsolatedStatsStore> scope_;
   testing::NiceMock<ThreadLocal::MockInstance> thread_local_;
   testing::NiceMock<ProtobufMessage::MockValidationContext> validation_context_;
+  testing::NiceMock<MockStatsConfig> stats_config_;
+  testing::NiceMock<AccessLog::MockAccessLogManager> access_log_manager_;
+  testing::NiceMock<Init::MockManager> init_manager_;
+  testing::NiceMock<MockServerLifecycleNotifier> lifecycle_notifier_;
+
   Singleton::ManagerPtr singleton_manager_;
   testing::NiceMock<MockAdmin> admin_;
   Event::GlobalTimeSystem time_system_;
   testing::NiceMock<Api::MockApi> api_;
   Grpc::ContextImpl grpc_context_;
+  Router::ContextImpl router_context_;
+  envoy::config::bootstrap::v3::Bootstrap bootstrap_;
+  testing::NiceMock<MockOptions> options_;
 };
+
 } // namespace Configuration
 } // namespace Server
 } // namespace Envoy

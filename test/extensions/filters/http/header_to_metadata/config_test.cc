@@ -3,8 +3,8 @@
 #include "envoy/extensions/filters/http/header_to_metadata/v3/header_to_metadata.pb.h"
 #include "envoy/extensions/filters/http/header_to_metadata/v3/header_to_metadata.pb.validate.h"
 
-#include "extensions/filters/http/header_to_metadata/config.h"
-#include "extensions/filters/http/header_to_metadata/header_to_metadata_filter.h"
+#include "source/extensions/filters/http/header_to_metadata/config.h"
+#include "source/extensions/filters/http/header_to_metadata/header_to_metadata_filter.h"
 
 #include "test/mocks/server/factory_context.h"
 #include "test/mocks/server/instance.h"
@@ -158,7 +158,6 @@ request_rules:
       value: foo
       regex_value_rewrite:
         pattern:
-          google_re2: {}
           regex: "^/(cluster[\\d\\w-]+)/?.*$"
         substitution: "\\1"
   )EOF";
@@ -177,7 +176,6 @@ request_rules:
       value: foo
       regex_value_rewrite:
         pattern:
-          google_re2: {}
           regex: "^/(cluster[\\d\\w-]+)/?.*$"
         substitution: "\\1"
   )EOF";

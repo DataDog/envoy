@@ -23,7 +23,7 @@ namespace Envoy {
 class XdsFuzzTest : public HttpIntegrationTest {
 public:
   XdsFuzzTest(const test::server::config_validation::XdsTestCase& input,
-              envoy::config::core::v3::ApiVersion api_version);
+              bool use_unified_mux = false);
 
   envoy::config::cluster::v3::Cluster buildCluster(const std::string& name);
 
@@ -63,7 +63,7 @@ private:
   void verifyRoutes();
 
   envoy::admin::v3::ListenersConfigDump getListenersConfigDump();
-  std::vector<envoy::api::v2::RouteConfiguration> getRoutesConfigDump();
+  std::vector<envoy::config::route::v3::RouteConfiguration> getRoutesConfigDump();
 
   bool eraseListener(const std::string& listener_name);
   bool hasRoute(const std::string& route_name);
@@ -77,7 +77,6 @@ private:
   std::vector<envoy::config::listener::v3::Listener> listeners_;
 
   uint64_t version_;
-  envoy::config::core::v3::ApiVersion api_version_;
 
   Network::Address::IpVersion ip_version_;
 
