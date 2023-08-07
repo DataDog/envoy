@@ -1,0 +1,26 @@
+# Avoid running go install within the main image as this is taking far more space
+FROM registry.ddbuild.io/images/mirror/golang:1.23.3 AS golang-install
+RUN cd / && go install honnef.co/go/tools/cmd/staticcheck@latest
+RUN cd / && go install github.com/google/go-containerregistry/cmd/crane@latest
+
+FROM registry.ddbuild.io/images/base/gbi-ubuntu_2204:release AS campaigner
+
+USER root
+# ARG TARGETOS
+# ARG TARGETARCH
+
+# Based on https://github.com/envoyproxy/envoy/blob/main/bazel/README.md#ubuntu
+RUN apt-get update && apt-get install -y \
+       jq \
+       git \
+       && rm -rf /var/lib/apt/lists/*
+
+# Install campaigner
+# The version should be aligned with the one in .campaigns.toml
+COPY --from=registry.ddbuild.io/campaigns:v0.0.13 /usr/local/bin/campaigns /usr/local/bin/campaigns
+
+COPY --from=golang-install /go/bin/crane /usr/local/bin/crane
+
+COPY --from=hairyhenderson/gomplate:v4.2.0 /gomplate /usr/local/bin/gomplate
+
+USER dog

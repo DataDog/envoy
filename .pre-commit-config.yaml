@@ -1,0 +1,10 @@
+repos:
+-   repo: local
+    hooks:
+    -   id: bazel-code-format
+        name: Bazel Code Format
+        entry: bzl run //tools/code_format:check_format -- fix
+        language: system
+        types: [file]
+        pass_filenames: false
+        always_run: true 

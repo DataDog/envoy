@@ -1,0 +1,291 @@
+stages:
+  - test
+  - build
+  - release
+  - campaigner
+
+variables:
+  GIT_BASE_BRANCH: dd-main
+  CI_IMAGE: registry.ddbuild.io/envoy-private/builder:v1.33.0-dd0-alpha.v-5867b23d
+  CAMPAIGNER_IMAGE: registry.ddbuild.io/envoy-private/campaigner:v1.33.0-dd4-alpha.v-c11a189a
+  SLACK_NOTIFIER_IMAGE: 486234852809.dkr.ecr.us-east-1.amazonaws.com/slack-notifier:sdm
+  FF_USE_FASTZIP: 1
+  # Most of those flags are based on https://github.com/envoyproxy/envoy/blob/main/ci/do_ci.sh
+  # adapted to our setup (e.g. for the repository and remote bazel cache)
+  DEFAULT_BAZEL_FLAGS: >
+    --experimental_scale_timeouts=3 --repository_cache=$CI_PROJECT_DIR/.bazel-repository-cache
+    --experimental_repository_cache_hardlinks --experimental_generate_json_trace_profile --test_output=errors --action_env=CLANG_FORMAT
+    --test_tmpdir=/build/tmp --config=clang-libc++ --remote_download_toplevel
+    --remote_cache=grpc://bazel-buildfarm.ddbuild.io:443  --remote_instance_name=remote-caching --remote_timeout=180 --remote_retries=1
+
+default:
+  before_script:
+    - git config --global --add safe.directory /go/src/github.com/DataDog/envoy-private
+
+.bazel-cache-write: &bazel-cache-write
+  key: envoy-private-0
+  paths:
+    # Used to store dependencies downloaded through http_archive
+    - $CI_PROJECT_DIR/.bazel-repository-cache
+    # Used to store items cloned from git
+    # - $CI_PROJECT_DIR/.bazel-output/external
+
+# Read only cache. A single job is updating the bazel cache, others are just pulling
+.bazel-cache:
+  <<: *bazel-cache-write
+  policy: pull
+
+noop-test:
+  stage: test
+  image: $SLACK_NOTIFIER_IMAGE
+  tags: ["arch:amd64"]
+  rules:
+  - if: $PUBLISH_ON_SCHEDULE
+    when: never
+  - when: on_success
+  script:
+    - echo "Doing nothing on purpose"
+
+noop-release:
+  stage: release
+  image: $SLACK_NOTIFIER_IMAGE
+  tags: ["arch:amd64"]
+  script:
+    - echo "Doing nothing on purpose"
+
+deliver-ci:
+  stage: .pre
+  image: $CI_IMAGE
+  when: manual
+  parallel:
+    matrix:
+    - NAME: builder
+    - NAME: campaigner
+  variables:
+    CI_ENABLE_CONTAINER_IMAGE_BUILDS: "true"
+  tags: ["arch:amd64", "specific:true"]
+  script:
+    - TAG=$(.datadog/ci/get_image_tag.sh)
+    - .datadog/ci/docker-release.sh --registry registry.ddbuild.io/envoy-private/$NAME -d .datadog/ci/Dockerfile-$NAME -t "$TAG" -p -r build
+    - echo "New image released $TAG"
+  id_tokens:
+    # Needed to sign images, refer to https://datadoghq.atlassian.net/wiki/spaces/SECENG/pages/2744681107/Image+Integrity+User+Guide#How-to-Sign-Non-Bazel-Image-Builds-(e.g.-Docker)
+    DDSIGN_ID_TOKEN:
+      aud: image-integrity
+
+setup-env-on-schedule:
+  stage: build
+  image: $CAMPAIGNER_IMAGE
+  tags: ["arch:amd64"]
+  script:
+    - |
+      TAG=$(.datadog/ci/get_image_tag.sh)
+      if [[ "$PUBLISH_ON_SCHEDULE" == "true" ]]; then
+        git fetch --tags
+        TAG=$(git tag -l "v*dd*" --sort=version:refname | tail -n1)
+        echo "using tag $TAG"
+      fi
+    - echo "TAG=$TAG" > tag.env
+  artifacts:
+    reports:
+      dotenv: tag.env
+
+format-check:
+  stage: test
+  image: $CI_IMAGE
+  tags: ["arch:amd64"]
+  script:
+    - bazel run //tools/code_format:check_format -- check
+
+# Repo-specific gitlab nodes currently provide up to 47cores/96Gi of RAM (when setting the specific:true tag)
+# Otherwise the currently enforced maximum is 47cores/32Gi of RAM
+
+# Tests are currently allowed to fail as some tests are failing on gitlab runners (lacking ipv6 support)
+envoy-test:
+  stage: test
+  image: $CI_IMAGE
+  rules:
+    - if: $PUBLISH_ON_SCHEDULE
+      when: never
+    - if: $COMPILEMODE == "opt" && ($CI_COMMIT_BRANCH == $GIT_BASE_BRANCH || $CI_COMMIT_TAG =~ /.*-dd/)
+      when: always
+      allow_failure: true
+    - if: $COMPILEMODE == "fastbuild" && $CI_COMMIT_BRANCH != $GIT_BASE_BRANCH
+      when: always
+      allow_failure: true
+    - when: manual
+      allow_failure: true
+  timeout: 3 hours
+  parallel:
+    matrix:
+      - TARGETARCH: amd64
+        COMPILEMODE: fastbuild
+      - TARGETARCH: amd64
+        COMPILEMODE: opt
+  tags:
+    - "arch:$TARGETARCH"
+    - "specific:true"
+  cache: *bazel-cache-write
+  dependencies: []
+  variables:
+    KUBERNETES_CPU_REQUEST: 47
+    KUBERNETES_CPU_LIMIT: 47
+    KUBERNETES_MEMORY_REQUEST: 96Gi
+    KUBERNETES_MEMORY_LIMIT: 96Gi
+  script:
+    - >
+      if [ $COMPILEMODE != "opt" ]; then
+        TEST_TARGETS="//test/... @com_github_google_quiche//:ci_tests"
+      else
+        TEST_TARGETS="//test/... //contrib/... @com_github_google_quiche//:ci_tests"
+      fi
+    - bazel/setup_clang.sh /opt/llvm
+    - bazel test --local_resources=cpu=$KUBERNETES_CPU_REQUEST --local_resources=memory=93000
+      $DEFAULT_BAZEL_FLAGS
+      --stripopt=--strip-all --compilation_mode=$COMPILEMODE $TEST_TARGETS
+
+
+# Building in opt mode only. The envoy debug image uses release builds
+# with debug symbols maintained
+envoy-build:
+  stage: build
+  image: $CI_IMAGE
+  rules:
+    - if: $PUBLISH_ON_SCHEDULE
+      when: always
+    - if: $COMPILEMODE == "default" && $CI_COMMIT_BRANCH == $GIT_BASE_BRANCH
+      when: always
+    - if: $CI_COMMIT_TAG =~ /.*-dd/
+      when: always
+    - when: manual
+      allow_failure: true
+  variables:
+    KUBERNETES_CPU_REQUEST: 47
+    KUBERNETES_CPU_LIMIT: 47
+    KUBERNETES_MEMORY_REQUEST: 96Gi
+    KUBERNETES_MEMORY_LIMIT: 96Gi
+  retry: 2 # the job is sometime failing to download dependency, see: https://datadoghq.atlassian.net/browse/CIEXE-911
+  timeout: 3 hours
+  tags:
+    - "arch:$TARGETARCH"
+    - "specific:true"
+  cache: *bazel-cache-write
+  parallel:
+    matrix:
+      - COMPILEMODE: default
+        TARGETARCH:
+          - amd64
+          - arm64
+      - COMPILEMODE: fips
+        TARGETARCH:
+          - amd64
+          - arm64
+  script:
+    - mkdir -p build_envoy/
+    - |
+      if [[ "$PUBLISH_ON_SCHEDULE" == "true" ]]; then
+        git fetch origin tag $TAG
+        git checkout $TAG
+        echo "fetch out $TAG to build"
+      fi
+    - bazel/setup_clang.sh /opt/llvm
+    - >
+      if [ $COMPILEMODE == "fips" ]; then
+        FIPS_OPTION="--define boringssl=fips"
+        OUTPUT_NAME="opt-fips"
+      elif [ $COMPILEMODE == "default" ]; then
+        FIPS_OPTION=""
+        OUTPUT_NAME="opt"
+      else
+        echo "Unknow compilation mode $COMPILEMODE"
+        exit 1
+      fi
+    # same as retry above this should reduce the number of time we have to retry
+    - for i in {1..5}; do bazel build //bazel/foreign_cc:unicode_icu_build && break; done
+    # We manually restrict resources to not get OOM killed or destroy entire nodes as CI pods are not in guaranteed QoS
+    # The JVM is set with 3GB of RAM, so leave at least 3Gi available
+    # Compilation mode and strip-all are actually already hard-coded within //distribution/binary:release
+    - bazel build --local_resources=cpu=$KUBERNETES_CPU_REQUEST --local_resources=memory=93000
+      $DEFAULT_BAZEL_FLAGS --verbose_failures
+      --stripopt=--strip-all --compilation_mode=opt
+      $FIPS_OPTION //distribution/binary:release
+    - mv bazel-bin/distribution/binary/release.tar.zst build_envoy/release-$OUTPUT_NAME-$TARGETARCH.tar.zst
+  after_script:
+    - du -sh $CI_PROJECT_DIR/.bazel-repository-cache/*
+  needs:
+    - setup-env-on-schedule
+  artifacts:
+    name: "$COMPILEMODE-$TARGETARCH-build"
+    paths:
+      - build_envoy/
+    expire_in: 1 day
+
+# Build actual docker images, with three manifests: FIPS, debug and default
+envoy-release:
+  stage: release
+  rules:
+    - if: $PUBLISH_ON_SCHEDULE && $TARGET == "prod"
+      when: always
+    # Build staging default image on merge
+    - if: $CI_COMMIT_BRANCH == $GIT_BASE_BRANCH && $TARGET == "staging"
+      when: always
+    # Build all prod images on dd tag
+    - if: $CI_COMMIT_TAG =~ /.*-dd/ && $TARGET == "prod"
+      when: always
+    - when: manual
+      allow_failure: true
+  image: $CI_IMAGE
+  variables:
+    CI_ENABLE_CONTAINER_IMAGE_BUILDS: "true"
+  tags: ["arch:amd64", "specific:true"]
+  cache: *bazel-cache-write
+  parallel:
+    matrix:
+      - MODE: release
+        TARGET:
+          - staging
+          - prod
+      - MODE: debug
+        TARGET:
+          - prod
+      - MODE: fips
+        TARGET:
+          - prod
+  needs:
+    - envoy-build
+    - setup-env-on-schedule
+  id_tokens:
+    # Needed to sign images, refer to https://datadoghq.atlassian.net/wiki/spaces/SECENG/pages/2744681107/Image+Integrity+User+Guide#How-to-Sign-Non-Bazel-Image-Builds-(e.g.-Docker)
+    DDSIGN_ID_TOKEN:
+      aud: image-integrity
+  script:
+    - .datadog/ci/docker-release.sh --tag $TAG --mode $MODE --push --replication $TARGET
+  artifacts:
+    name: "$MODE-output"
+    paths:
+      - output/
+    expire_in: 1 day
+
+campaigner:
+  stage: campaigner
+  rules:
+   - if: $PUBLISH_ON_SCHEDULE
+     when: on_success
+   - if: $CI_COMMIT_TAG =~ /.*-dd/
+     when: on_success
+   - when: manual
+  image: $CAMPAIGNER_IMAGE
+  tags: ["arch:amd64"]
+  script:
+  - bash .datadog/ci/campaigner.sh
+  needs:
+  - job: envoy-release
+    parallel:
+      matrix:
+        - MODE: release
+          TARGET: prod
+        - MODE: debug
+          TARGET: prod
+        - MODE: fips
+          TARGET: prod
+  - job: setup-env-on-schedule

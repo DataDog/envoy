@@ -1,0 +1,65 @@
+# We reuse the envoy builder built in https://github.com/envoyproxy/envoy-build-tools/blob/main/docker/linux/ubuntu/Dockerfile as base for our CI/builder image
+FROM envoyproxy/envoy-build-ubuntu:2fdbd8820fdad449f727276c73c26e6e1ba92a40 AS builder
+
+ARG TARGETOS
+ARG TARGETARCH
+
+# Based on https://github.com/envoyproxy/envoy/blob/main/bazel/README.md#ubuntu
+RUN apt-get update && apt-get install -y \
+       autoconf \
+       curl \
+       libtool \
+       patch \
+       python3-pip \
+       unzip \
+       virtualenv \
+       zstd \
+       docker-ce-cli \
+       docker-buildx-plugin \
+       && rm -rf /var/lib/apt/lists/*
+
+# For some reason llvm depends on this old version of the library on amd64 (it's fine without it on ARM64)
+RUN if [ "${TARGETARCH}" = "amd64" ]; then apt-get update && apt-get install -y libncurses5 && rm -rf /var/lib/apt/lists/*; fi
+
+# Install cmake and ninja, as used by envoy to actually compile
+ENV CMAKE_VERSION=3.26.4
+RUN mkdir -p /tools/cmake && cd /tools && \
+    if [ "${TARGETARCH}" = "amd64" ]; then export OLDARCH="x86_64" ; else export OLDARCH="aarch64" ; fi && \
+    curl -L https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/cmake-$CMAKE_VERSION-$TARGETOS-$OLDARCH.tar.gz -o cmake.tar.gz && \
+    tar -xvzf cmake.tar.gz -C cmake/ --strip-components=1
+ENV PATH=/tools/cmake/bin:$PATH
+RUN mkdir -p /tools && cd /tools && git clone https://github.com/ninja-build/ninja.git -b release --depth 1 && \
+    cd ninja && cmake -Bbuild-cmake && cmake --build build-cmake
+ENV PATH=/tools/ninja/build-cmake:$PATH
+
+# installs bazel version locked in .bazelversion
+RUN bazel > /dev/null
+
+USER root
+# Install Datadog default internal certificates. ddsign does not work otherwise
+COPY --from=registry.ddbuild.io/images/datadog-ca-certs:standard /certs/ /usr/local/share/ca-certificates/
+RUN set -x \
+    && chmod -R o-w /usr/local/share/ca-certificates \
+    && update-ca-certificates
+
+# Install docker credentials helper for datadog registry
+# See https://datadoghq.atlassian.net/wiki/spaces/EEEUSG/pages/2249588797/Registry+Authentication+with+Vault#CI
+RUN set -x \
+    && curl -fsSL https://binaries.ddbuild.io/registry/setup-docker-credential-helpers-${TARGETARCH}.sh -o /usr/bin/setup-docker-credentials.sh \
+    && bash /usr/bin/setup-docker-credentials.sh \
+    && rm /usr/bin/setup-docker-credentials.sh
+
+# Bazel refuses to run on root, so make sure to have a separate user for compilation
+RUN mkdir -p /build \
+    && groupadd --gid 15000 -f envoygroup \
+    && useradd -o --uid 15000 --gid 15000 --no-create-home --home-dir /build envoybuild \
+    && usermod -a -G pcap envoybuild \
+    && chown envoybuild:envoygroup /build
+
+USER envoybuild
+
+# Copy basic docker config to point login for registry
+COPY --chown=envoybuild:envoygroup .datadog/ci/docker/config.json /build/.docker/config.json
+
+# Install ddsign to be able to sign delivered images
+COPY --from=registry.ddbuild.io/ddsign:v1.11.8@sha256:bf9bd1d23730a1702fb0cc0700d72e1e62ddecf323e0e830eb134319915bb8e3 /usr/local/bin/ddsign /usr/local/bin/ddsign

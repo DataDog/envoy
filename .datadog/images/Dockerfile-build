@@ -1,0 +1,54 @@
+ARG BASE_IMAGE="registry.ddbuild.io/images/base/gbi-ubuntu_2204:release"
+# We use a builder to decompress the tarballs built by envoy
+# This greatly reduces the context size to be passed to docker and avoids requiring zstd on the machine
+FROM ${BASE_IMAGE} AS builder
+ARG BASE_IMAGE="registry.ddbuild.io/images/base/gbi-ubuntu_2204:release"
+ARG TARGETARCH
+ARG COMPILE_MODE="opt"
+
+USER root
+
+RUN apt-get -qq update && apt-get install --no-install-recommends -y zstd && apt-get -qq autoremove -y
+
+RUN mkdir -p /build/
+COPY build_envoy/release-$COMPILE_MODE-$TARGETARCH.tar.zst /build/
+RUN zstd -d /build/release-$COMPILE_MODE-$TARGETARCH.tar.zst && \
+    tar -xvf /build/release-$COMPILE_MODE-$TARGETARCH.tar -C /build/
+
+# This dockerfile is adapted from https://github.com/envoyproxy/envoy/blob/main/ci/Dockerfile-envoy
+FROM ${BASE_IMAGE}  AS envoyproxy
+
+ARG TARGETARCH
+
+ENV DEBIAN_FRONTEND=noninteractive
+EXPOSE 10000
+CMD ["envoy", "-c", "/etc/envoy/envoy.yaml"]
+USER root
+RUN mkdir -p /etc/envoy \
+    && adduser --group --system envoy
+ENTRYPOINT ["/docker-entrypoint.sh"]
+ADD VERSION.txt /etc/envoy
+# NB: Adding this here means that following steps, for example updating the system packages, are run
+#   when the version file changes. This should mean that a release version will always update.
+#   In PRs this will just use cached layers unless either this file changes or the version has changed.
+RUN --mount=type=tmpfs,target=/var/cache/apt \
+    --mount=type=tmpfs,target=/var/lib/apt/lists \
+    apt-get -qq update \
+    && apt-get -qq upgrade -y \
+    && apt-get -qq install --no-install-recommends -y ca-certificates \
+    && apt-get -qq autoremove -y
+
+ADD --chown=0:0 --chmod=644 configs/envoyproxy_io_proxy.yaml /etc/envoy/envoy.yaml
+COPY --chown=0:0 --chmod=755 ci/docker-entrypoint.sh /
+COPY --from=builder --chown=0:0 --chmod=755 /build/utils/su-exec /usr/local/bin/
+ARG ENVOY_BINARY=envoy
+ARG ENVOY_BINARY_PREFIX=
+COPY --from=builder --chown=0:0 --chmod=755 "/build/${ENVOY_BINARY_PREFIX}${ENVOY_BINARY}" /usr/local/bin/envoy
+COPY --from=builder --chown=0:0 --chmod=755 /build/${ENVOY_BINARY_PREFIX}${ENVOY_BINARY}\.* /usr/local/bin/
+
+# Enable binding on ports below 1024 as non-privileged user.
+# We need this for gateways and some fabric proxies, which sometimes bind on 80/443
+RUN clean-apt install -y libcap2-bin && setcap 'cap_net_bind_service=+ep' /usr/local/bin/envoy \ 
+  && clean-apt remove -y libcap2-bin
+
+USER envoy

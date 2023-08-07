@@ -1,0 +1,4 @@
+# This file overrides the one in / or in docs/
+
+# These owners will be the default owners for everything in the repo.
+* @DataDog/fabric
