@@ -5,6 +5,7 @@
 #include "envoy/config/trace/v3/datadog.pb.h"
 #include "envoy/config/trace/v3/datadog.pb.validate.h"
 
+#include "source/common/common/logger.h"
 #include "source/extensions/tracers/common/factory_base.h"
 
 namespace datadog {
@@ -23,12 +24,12 @@ namespace Datadog {
 /**
  * Config registration for the Datadog tracer. @see TracerFactory.
  */
-class DatadogTracerFactory : public Common::FactoryBase<envoy::config::trace::v3::DatadogConfig> {
+class DatadogTracerFactory : public Common::FactoryBase<envoy::config::trace::v3::DatadogConfig>, public Envoy::Logger::Loggable<Envoy::Logger::Id::tracing> {
 public:
   DatadogTracerFactory();
 
   static datadog::tracing::TracerConfig
-  makeConfig(const envoy::config::trace::v3::DatadogConfig& proto_config);
+  makeConfig(const envoy::config::trace::v3::DatadogConfig& proto_config, Envoy::Upstream::ClusterManager& cluster_manager);
   static std::string
   makeCollectorReferenceHost(const envoy::config::trace::v3::DatadogConfig& proto_config);
 

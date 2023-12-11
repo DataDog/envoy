@@ -7,6 +7,7 @@
 
 #include "source/common/common/assert.h"
 #include "source/common/config/utility.h"
+#include "source/common/http/utility.h"
 #include "source/common/tracing/null_span_impl.h"
 #include "source/extensions/tracers/datadog/agent_http_client.h"
 #include "source/extensions/tracers/datadog/dict_util.h"
@@ -15,6 +16,7 @@
 #include "source/extensions/tracers/datadog/span.h"
 #include "source/extensions/tracers/datadog/time_util.h"
 
+#include "datadog/datadog_agent_config.h"
 #include "datadog/dict_reader.h"
 #include "datadog/error.h"
 #include "datadog/sampling_priority.h"
@@ -49,6 +51,8 @@ std::shared_ptr<Tracer::ThreadLocalTracer> makeThreadLocalTracer(
   return std::make_shared<Tracer::ThreadLocalTracer>(*maybe_config);
 }
 
+
+
 } // namespace
 
 Tracer::ThreadLocalTracer::ThreadLocalTracer(const datadog::tracing::FinalizedTracerConfig& config)
@@ -61,10 +65,6 @@ Tracer::Tracer(const std::string& collector_cluster, const std::string& collecto
     : tracer_stats_(makeTracerStats(scope)),
       thread_local_slot_(
           ThreadLocal::TypedSlot<ThreadLocalTracer>::makeUnique(thread_local_slot_allocator)) {
-  const bool allow_added_via_api = true;
-  Config::Utility::checkCluster("envoy.tracers.datadog", collector_cluster, cluster_manager,
-                                allow_added_via_api);
-
   thread_local_slot_->set([&logger = ENVOY_LOGGER(), collector_cluster, collector_reference_host,
                            config, &tracer_stats = tracer_stats_,
                            &cluster_manager](Event::Dispatcher& dispatcher) {

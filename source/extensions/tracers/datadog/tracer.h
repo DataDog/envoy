@@ -33,7 +33,7 @@ namespace Datadog {
  * dependencies, and installs a thread-local instance of itself from which
  * traces can be created.
  */
-class Tracer : public Tracing::Driver, private Logger::Loggable<Logger::Id::tracing> {
+class Tracer : public Tracing::Driver, private Envoy::Logger::Loggable<Envoy::Logger::Id::tracing> {
 public:
   /**
    * Create a \c Tracer that produces traces according to the specified \p config
