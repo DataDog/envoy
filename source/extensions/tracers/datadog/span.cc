@@ -74,6 +74,8 @@ void Span::setTag(absl::string_view name, absl::string_view value) {
     // Here we translate into the dd-trace-cpp equivalent.
     span_->set_error_message(value);
     span_->set_tag(name, value);
+  } else if (name == "component") {
+    span_->set_tag(name, "envoy");
   } else {
     span_->set_tag(name, value);
   }
