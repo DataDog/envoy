@@ -21,7 +21,7 @@ DatadogTracerFactory::DatadogTracerFactory() : FactoryBase("envoy.tracers.datado
 
 datadog::tracing::TracerConfig
 DatadogTracerFactory::makeConfig(const envoy::config::trace::v3::DatadogConfig& proto_config) {
-  datadog::tracing::TracerConfig config;
+  datado::tracing::TracerConfig config;
   config.version = "envoy " + Envoy::VersionInfo::version();
   config.name = "envoy.proxy";
   if (proto_config.service_name().empty()) {
@@ -30,8 +30,10 @@ DatadogTracerFactory::makeConfig(const envoy::config::trace::v3::DatadogConfig& 
     config.service = proto_config.service_name();
   }
 
+  config.agent.remote_configuration_enabled = false;
+
   config.integration_name = "envoy";
-  config.integration_version = Envoy::VersionInfo::version();
+  config.integration_version = BUILD_VERSION_NUMBER;
 
   return config;
 }
