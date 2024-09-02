@@ -78,9 +78,16 @@ Tracer::Tracer(const std::string& collector_cluster, const std::string& collecto
 
 // Tracer::TracingDriver
 
+static std::string makeResourceName(const Http::RequestHeaderMap* request_headers) {
+  absl::string_view path(request_headers->EnvoyOriginalPath()
+                             ? request_headers->getEnvoyOriginalPathValue()
+                             : request_headers->getPathValue());
+
+  return absl::StrCat(request_headers->getMethodValue(), " ", path);
+}
+
 Tracing::SpanPtr Tracer::startSpan(const Tracing::Config&, Tracing::TraceContext& trace_context,
-                                   const StreamInfo::StreamInfo& stream_info,
-                                   const std::string& operation_name,
+                                   const StreamInfo::StreamInfo& stream_info, const std::string&,
                                    Tracing::Decision tracing_decision) {
   ThreadLocalTracer& thread_local_tracer = **thread_local_slot_;
   if (!thread_local_tracer.tracer) {
@@ -95,7 +102,7 @@ Tracing::SpanPtr Tracer::startSpan(const Tracing::Config&, Tracing::TraceContext
   // name," instead describes the category of operation being performed, which
   // here we hard-code.
   span_config.name = "envoy.proxy";
-  span_config.resource = operation_name;
+  span_config.resource = makeResourceName(stream_info.getRequestHeaders());
   span_config.start = estimateTime(stream_info.startTime());
 
   TraceContextReader reader{trace_context};
