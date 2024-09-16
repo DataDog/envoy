@@ -5,8 +5,6 @@
 
 #include "source/common/common/assert.h"
 
-#include "datadog/json.hpp"
-
 namespace Envoy {
 namespace Extensions {
 namespace Tracers {
@@ -64,10 +62,10 @@ EventScheduler::schedule_recurring_event(std::chrono::steady_clock::duration int
   };
 }
 
-nlohmann::json EventScheduler::config_json() const {
-  return nlohmann::json::object({
+std::string EventScheduler::config() const {
+  return R"({
       {"type", "Envoy::Extensions::Tracers::Datadog::EventScheduler"},
-  });
+  })";
 }
 
 } // namespace Datadog
