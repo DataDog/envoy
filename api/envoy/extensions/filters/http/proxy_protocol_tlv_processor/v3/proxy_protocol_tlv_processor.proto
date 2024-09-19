@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package envoy.extensions.filters.http.proxy_protocol_tlv_processor.v3;
+
+option java_package = "io.envoyproxy.envoy.extensions.filters.http.proxy_protocol_tlv_processor.v3";
+option java_outer_classname = "ProxyProtocolTlvProcessorProto";
+option java_multiple_files = true;
+option go_package = "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/proxy_protocol_tlv_processor/v3;proxy_protocol_tlv_processorv3";
+import "udpa/annotations/status.proto";
+option (udpa.annotations.file_status).package_version_status = FROZEN;
+
+// [#protodoc-title: Proxy Protocol TLV Processor]
+// Proxy Protocol TLV Processor.
+// [#extension: envoy.filters.http.proxy_protocol_tlv_processor]
+
+// ProxyProtocolTLVProcessor filter config.
+// [#next-free-field: 6]
+message ProxyProtocolTlvProcessor {
+  // A list of proxy protocol v2 tlvs to be considered by the filter.
+  // Tlvs not mentioned in the list will be ignored.
+  // The filter is a noop if this list is empty.
+  repeated uint32 tlvs = 1;
+
+  // If true tlvs will be base64 encoded and set as an http header each
+  bool set_headers = 2;
+
+  // If true tlvs will be set a filter dynamic metadata
+  bool set_metadata = 3;
+
+  // A prefix to the header names.
+  // The header name for a tlv will be header_prefix + tlv.type.
+  // If not set defaults to `ppv2_tlv_`.
+  string header_prefix = 4;
+
+  // A metadata namespace where tlv values are set.
+  // If not set defaults to `envoy.filters.http.proxy_protocol_tlv_processor`.
+  string metadata_namespace = 5;
+}

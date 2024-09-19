@@ -190,7 +190,7 @@ EXTENSIONS = {
     "envoy.filters.http.wasm":                          "//source/extensions/filters/http/wasm:config",
     "envoy.filters.http.stateful_session":              "//source/extensions/filters/http/stateful_session:config",
     "envoy.filters.http.header_mutation":               "//source/extensions/filters/http/header_mutation:config",
-
+    "envoy.filters.http.proxy_protocol_tlv_processor":  "//source/extensions/filters/http/proxy_protocol_tlv_processor:config",
     #
     # Listener filters
     #

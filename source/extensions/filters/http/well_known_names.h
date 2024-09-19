@@ -110,6 +110,8 @@ public:
   const std::string ExternalProcessing = "envoy.filters.http.ext_proc";
   // Set metadata filter
   const std::string SetMetadata = "envoy.filters.http.set_metadata";
+  // Set proxy protocol tlvs as http headers
+  const std::string ProxyProtocolTlvProcessor = "envoy.filters.http.proxy_protocol_tlv_processor";
 };
 
 using HttpFilterNames = ConstSingleton<HttpFilterNameValues>;
