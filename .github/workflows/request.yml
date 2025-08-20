@@ -24,7 +24,7 @@ jobs:
   request:
     # For branches this can be pinned to a specific version if required
     # NB: `uses` cannot be dynamic so it _must_ be hardcoded anywhere it is read
-    uses: envoyproxy/envoy/.github/workflows/_request.yml@main
+    uses: envoyproxy/envoy/.github/workflows/_request.yml@64cb65c7d1a1b8d1d779ac2424ac530addac5762 # main
     if: ${{ vars.ENVOY_CI || github.repository == 'envoyproxy/envoy' }}
     permissions:
       actions: read
