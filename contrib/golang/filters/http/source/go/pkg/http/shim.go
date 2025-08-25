@@ -79,8 +79,10 @@ func (f *requestMap) initialize(concurrency uint32) {
 }
 
 func (f *requestMap) StoreReq(key *C.httpRequest, req *httpRequest) error {
+	api.LogInfof(`{"requestMap.StoreReq": "key", "worker_id": "%d", "request": "%v"}`, key.worker_id, key)
 	m := f.requests[key.worker_id]
 	if _, ok := m[key]; ok {
+		api.LogInfof(`{"requestMap.StoreReq": "dup", "worker_id": "%d", "request": "%v"}`, key.worker_id, key)
 		return ErrDupRequestKey
 	}
 	m[key] = req
@@ -88,14 +90,17 @@ func (f *requestMap) StoreReq(key *C.httpRequest, req *httpRequest) error {
 }
 
 func (f *requestMap) GetReq(key *C.httpRequest) *httpRequest {
+	api.LogInfof(`{"requestMap.Get": "key", "worker_id": "%d", "request": "%v"}`, key.worker_id, key)
 	return f.requests[key.worker_id][key]
 }
 
 func (f *requestMap) DeleteReq(key *C.httpRequest) {
+	api.LogInfof(`{"requestMap.DeleteReq": "key", "worker_id": "%d", "request": "%v"}`, key.worker_id, key)
 	delete(f.requests[key.worker_id], key)
 }
 
 func (f *requestMap) Clear() {
+	api.LogInfof(`{"requestMap.Clear": "key", "worker_id": "%d", "request": "%v"}`, key.worker_id, key)
 	for idx := range f.requests {
 		f.requests[idx] = map[*C.httpRequest]*httpRequest{}
 	}
