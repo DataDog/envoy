@@ -26,6 +26,10 @@ void rebuildRouteConfigVirtualHosts(
     envoy::config::route::v3::RouteConfiguration& route_config) {
   route_config.clear_virtual_hosts();
   for (const auto& vhost : rds_vhosts) {
+    auto found = vhds_vhosts.find(vhost.first);
+    if (found != vhds_vhosts.end()) {
+      continue;
+    }
     route_config.mutable_virtual_hosts()->Add()->CheckTypeAndMergeFrom(vhost.second);
   }
   for (const auto& vhost : vhds_vhosts) {
