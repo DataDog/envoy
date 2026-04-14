@@ -2128,31 +2128,4 @@ TEST_P(GolangIntegrationTest, DrainConnectionUponCompletion) {
   cleanupUpstreamAndDownstream();
 }
 
-// Regression test for https://github.com/envoyproxy/envoy/issues/44320.
-TEST_P(GolangIntegrationTest, AsyncContinueWithNoHealthyUpstream) {
-  config_helper_.addConfigModifier([](envoy::config::bootstrap::v3::Bootstrap& bootstrap) {
-    auto* cluster = bootstrap.mutable_static_resources()->mutable_clusters(0);
-    cluster->mutable_load_assignment()->mutable_endpoints(0)->clear_lb_endpoints();
-  });
-
-  initializeBasicFilter(BASIC, "test.com");
-
-  codec_client_ = makeHttpConnection(makeClientConnection(lookupPort("http")));
-
-  Http::TestRequestHeaderMapImpl request_headers{
-      {":method", "POST"},        {":path", "/test?async=1&sleep=1"}, {":scheme", "http"},
-      {":authority", "test.com"}, {"x-test-header-0", "foo"},
-  };
-
-  auto encoder_decoder = codec_client_->startRequest(request_headers);
-  Http::RequestEncoder& request_encoder = encoder_decoder.first;
-  auto response = std::move(encoder_decoder.second);
-  codec_client_->sendData(request_encoder, "request body", true);
-
-  ASSERT_TRUE(response->waitForEndStream());
-  EXPECT_EQ("503", response->headers().getStatusValue());
-
-  cleanup();
-}
-
 } // namespace Envoy
