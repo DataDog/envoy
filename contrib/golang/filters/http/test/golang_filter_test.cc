@@ -261,8 +261,7 @@ TEST_F(GolangHttpFilterTest, BufferedDataAfterDestroyDuringContinue) {
   EXPECT_FALSE(data_called_after_destroy)
       << "envoyGoFilterOnHttpData must not be called after onDestroy";
 
-  // The mock onDestroy intentionally didn't delete req_ (to keep state valid
-  // for the doDataGo path). Clean it up now to avoid leaking under ASAN.
+  ASSERT_NE(nullptr, filter->testReq());
   delete filter->testReq();
 }
 
