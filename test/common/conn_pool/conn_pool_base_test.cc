@@ -6,7 +6,6 @@
 #include "test/mocks/upstream/cluster_info.h"
 #include "test/mocks/upstream/host.h"
 #include "test/test_common/simulated_time_system.h"
-#include "test/test_common/test_runtime.h"
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -96,6 +95,7 @@ public:
               (const Upstream::HostDescriptionConstSharedPtr& n, absl::string_view,
                ConnectionPool::PoolFailureReason, AttachContext&));
   MOCK_METHOD(void, onPoolReady, (ActiveClient&, AttachContext&));
+  void setSkipPendingOverflowForTest(bool value) { skip_pending_overflow_on_active_rq_ = value; }
 };
 
 class ConnPoolImplBaseTest : public testing::Test {
@@ -716,9 +716,9 @@ TEST_F(ConnPoolImplDispatcherBaseTest, MaxActiveRequestsOverflow) {
 // Test legacy behavior: when the runtime flag is disabled, both upstream_rq_active_overflow
 // and upstream_rq_pending_overflow are incremented for the max_active_requests path.
 TEST_F(ConnPoolImplDispatcherBaseTest, MaxActiveRequestsOverflowLegacy) {
-  TestScopedRuntime scoped_runtime;
-  scoped_runtime.mergeValues(
-      {{"envoy.reloadable_features.skip_pending_overflow_count_on_active_rq", "false"}});
+  // Simulate the legacy behavior where skip_pending_overflow_count_on_active_rq is false.
+  // We set the cached flag directly since the pool is constructed before the test body runs.
+  pool_.setSkipPendingOverflowForTest(false);
 
   concurrent_streams_ = 2;
   cluster_->resetResourceManager(1024, 1024, 1, 1, 1);
