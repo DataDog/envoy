@@ -25,7 +25,7 @@ load("@rules_rust//rust:repositories.bzl", "rules_rust_dependencies", "rust_regi
 load("@shellcheck//:deps.bzl", "shellcheck_dependencies")
 
 # go version for rules_go
-GO_VERSION = "1.24.6"
+GO_VERSION = "1.26.2"
 
 JQ_VERSION = "1.7"
 YQ_VERSION = "4.24.4"
