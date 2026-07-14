@@ -1150,9 +1150,12 @@ private:
   // Context for upstream network filters. Always scoped to stats_scope_ ("cluster.<name>."), since
   // network filters scope stats via context.scope() and have no stats_prefix parameter.
   UpstreamFactoryContextImpl upstream_context_;
-  // Context for upstream HTTP filters. Scoped to the server root when the correct-stats-prefix flag
-  // is enabled (the explicit "cluster.<name>." stats_prefix is then passed via FilterChainHelper),
-  // otherwise scoped to stats_scope_ to preserve legacy stat names.
+  // Scope for upstream HTTP filters, owned by the cluster so the filter stats share the cluster's
+  // lifetime. When the correct-stats-prefix flag is enabled this is a fresh empty-prefix scope (the
+  // explicit "cluster.<name>." stats_prefix is passed separately via FilterChainHelper); otherwise
+  // it is stats_scope_ so legacy stat names are unchanged.
+  Stats::ScopeSharedPtr http_filter_scope_;
+  // Context for upstream HTTP filters, backed by http_filter_scope_.
   UpstreamFactoryContextImpl http_upstream_context_;
   const std::unique_ptr<
       const envoy::config::cluster::v3::UpstreamConnectionOptions::HappyEyeballsConfig>

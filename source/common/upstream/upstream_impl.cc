@@ -1254,12 +1254,11 @@ ClusterInfoImpl::ClusterInfoImpl(
       network_filter_config_provider_manager_(
           createSingletonUpstreamNetworkFilterConfigProviderManager(server_context)),
       upstream_context_(server_context, init_manager, *stats_scope_),
-      http_upstream_context_(
-          server_context, init_manager,
-          Runtime::runtimeFeatureEnabled(
-              "envoy.reloadable_features.upstream_http_filters_correct_stats_prefix")
-              ? server_context.serverScope()
-              : *stats_scope_),
+      http_filter_scope_(Runtime::runtimeFeatureEnabled(
+                             "envoy.reloadable_features.upstream_http_filters_correct_stats_prefix")
+                             ? server_context.serverScope().createScope("")
+                             : stats_scope_),
+      http_upstream_context_(server_context, init_manager, *http_filter_scope_),
       happy_eyeballs_config_(
           config.upstream_connection_options().has_happy_eyeballs_config()
               ? std::make_unique<
@@ -1409,16 +1408,13 @@ ClusterInfoImpl::ClusterInfoImpl(
   // early validation of sanity of fields that we should catch at config ingestion.
   DurationUtil::durationToMilliseconds(common_lb_config_->update_merge_window());
 
-  // stats_prefix passed to the upstream HTTP filter chain. When the correct-stats-prefix flag is
-  // enabled, http_upstream_context_ is scoped to the server root, so pass an explicit
-  // "cluster.<name>." prefix (mirroring the router, which passes the HCM stat prefix). When
-  // disabled, http_upstream_context_ keeps the cluster-scoped stats_scope_, so reproduce the legacy
-  // stringified scope prefix to keep existing stat names unchanged.
+  // stats_prefix passed to the upstream HTTP filter chain. This is always the cluster's sanitized
+  // stat prefix ("cluster.<observability name>."); only the scope differs by flag (see
+  // http_filter_scope_). With the flag on, an empty-prefix scope + this prefix yields correctly
+  // namespaced stats; with it off, the cluster-scoped stats_scope_ + this prefix reproduces the
+  // legacy (repeated-prefix) stat names.
   const std::string http_stats_prefix =
-      Runtime::runtimeFeatureEnabled(
-          "envoy.reloadable_features.upstream_http_filters_correct_stats_prefix")
-          ? absl::StrCat("cluster.", name_, ".")
-          : stats_scope_->symbolTable().toString(stats_scope_->prefix());
+      stats_scope_->symbolTable().toString(stats_scope_->prefix());
 
   // Create upstream network filter factories
   const auto& filters = config.filters();
