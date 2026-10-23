@@ -7,6 +7,7 @@ module(
 
 # Core dependencies from Bazel Central Registry
 bazel_dep(name = "abseil-cpp", version = "20250814.1")
+bazel_dep(name = "aspect_bazel_lib", version = "2.21.2")
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "gazelle", version = "0.47.0", repo_name = "gazelle")
 bazel_dep(name = "googleapis", version = "0.0.0-20251003-2193a2bf")
@@ -49,7 +50,7 @@ use_repo(
 )
 
 # Go dependencies extension
-go_deps = use_extension("@bazel_gazelle//:extensions.bzl", "go_deps")
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.module(
     path = "github.com/planetscale/vtprotobuf",
     sum = "h1:ujRGEVWJEoaxQ+8+HMl8YEpGaDAgohgZxJ5S+d2TTFQ=",

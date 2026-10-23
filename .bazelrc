@@ -21,7 +21,8 @@ startup --host_jvm_args="-DBAZEL_TRACK_SOURCE_DIRECTORIES=1"
 
 common --noenable_bzlmod
 common --enable_workspace
-common --noincompatible_disallow_empty_glob
+# Preserve Bazel 7 behavior for optional file globs under Bazel 8.
+common --incompatible_disallow_empty_glob=false
 common --noincompatible_disallow_ctx_resolve_tools
 common --legacy_external_runfiles
 

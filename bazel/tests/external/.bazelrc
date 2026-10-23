@@ -15,7 +15,8 @@ run --color=yes
 
 common --enable_workspace
 common --noenable_bzlmod
-common --noincompatible_disallow_empty_glob
+# Preserve Bazel 7 behavior for optional file globs under Bazel 8.
+common --incompatible_disallow_empty_glob=false
 
 build --workspace_status_command="bash get_workspace_status"
 build --incompatible_strict_action_env
