@@ -1,6 +1,9 @@
 # Enable bzlmod for modern dependency management with MODULE.bazel
 common --enable_bzlmod
 
+# Preserve Bazel 7 behavior for optional file globs under Bazel 8.
+common --incompatible_disallow_empty_glob=false
+
 # Java runtime configuration for bzlmod
 # Use remote JDK to avoid dependency on local Java installation
 build --java_runtime_version=remotejdk_11
